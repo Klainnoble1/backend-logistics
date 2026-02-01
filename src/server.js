@@ -10,6 +10,22 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Root – show API info (so base URL isn’t “Route not found”)
+app.get('/', (req, res) => {
+  res.json({
+    name: 'Oprime Logistics API',
+    status: 'ok',
+    docs: {
+      health: '/health',
+      auth: '/api/auth (login, register, me)',
+      parcels: '/api/parcels',
+      drivers: '/api/drivers',
+      admin: '/api/admin',
+      payments: '/api/payments'
+    }
+  });
+});
+
 // Routes
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/parcels', require('./routes/parcels'));

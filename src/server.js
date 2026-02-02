@@ -31,7 +31,16 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/parcels', require('./routes/parcels'));
 app.use('/api/drivers', require('./routes/drivers'));
 app.use('/api/admin', require('./routes/admin'));
-app.use('/api/payments', require('./routes/payments'));
+// Lazy-load payments so a paymentService load error doesn't crash the whole API
+app.use('/api/payments', (req, res, next) => {
+  try {
+    const paymentsRouter = require('./routes/payments');
+    return paymentsRouter(req, res, next);
+  } catch (err) {
+    console.error('Payments route load error:', err);
+    res.status(500).json({ error: 'Payments module failed to load', message: err.message });
+  }
+});
 
 // Health check
 app.get('/health', (req, res) => {

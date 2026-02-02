@@ -76,6 +76,123 @@ router.get('/me/assignments', authorize('driver'), async (req, res) => {
   }
 });
 
+// Get available parcels (not yet assigned) – drivers can pick from these
+router.get('/me/available-parcels', authorize('driver'), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT p.id, p.tracking_id, p.recipient_name, p.recipient_phone,
+              p.pickup_address, p.delivery_address, p.parcel_type, p.weight,
+              p.service_type, p.status, p.price, p.estimated_delivery_date,
+              p.created_at, u.full_name as sender_name
+       FROM parcels p
+       INNER JOIN users u ON p.sender_id = u.id
+       WHERE p.status = 'created'
+         AND NOT EXISTS (SELECT 1 FROM assignments a WHERE a.parcel_id = p.id)
+       ORDER BY p.created_at DESC`
+    );
+
+    const parcels = result.rows.map((row) => ({
+      id: row.id,
+      trackingId: row.tracking_id,
+      recipientName: row.recipient_name,
+      recipientPhone: row.recipient_phone,
+      pickupAddress: row.pickup_address,
+      deliveryAddress: row.delivery_address,
+      parcelType: row.parcel_type,
+      weight: parseFloat(row.weight),
+      serviceType: row.service_type,
+      status: row.status,
+      price: parseFloat(row.price),
+      estimatedDeliveryDate: row.estimated_delivery_date,
+      createdAt: row.created_at,
+      senderName: row.sender_name,
+    }));
+
+    res.json({ parcels });
+  } catch (error) {
+    console.error('Get available parcels error:', error);
+    res.status(500).json({ error: 'Failed to get available parcels' });
+  }
+});
+
+// Claim a parcel (driver self-assigns)
+router.post('/me/claim', [
+  body('parcelId').isUUID(),
+], authorize('driver'), async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { parcelId } = req.body;
+
+    const driverResult = await pool.query(
+      'SELECT id, status FROM drivers WHERE user_id = $1',
+      [req.user.id]
+    );
+
+    if (driverResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Driver profile not found' });
+    }
+
+    const driverId = driverResult.rows[0].id;
+
+    const parcelResult = await pool.query(
+      'SELECT id, status FROM parcels WHERE id = $1',
+      [parcelId]
+    );
+
+    if (parcelResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Parcel not found' });
+    }
+
+    if (parcelResult.rows[0].status !== 'created') {
+      return res.status(400).json({ error: 'Parcel is not available for delivery' });
+    }
+
+    const assignmentCheck = await pool.query(
+      'SELECT id FROM assignments WHERE parcel_id = $1',
+      [parcelId]
+    );
+
+    if (assignmentCheck.rows.length > 0) {
+      return res.status(400).json({ error: 'Parcel is already assigned to another driver' });
+    }
+
+    const assignmentResult = await pool.query(
+      `INSERT INTO assignments (parcel_id, driver_id, assigned_by, status)
+       VALUES ($1, $2, $3, 'pending')
+       RETURNING *`,
+      [parcelId, driverId, req.user.id]
+    );
+
+    await pool.query(
+      'UPDATE drivers SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      ['busy', driverId]
+    );
+
+    await pool.query(
+      `UPDATE parcels SET status = 'picked_up' WHERE id = $1`,
+      [parcelId]
+    );
+
+    await pool.query(
+      `INSERT INTO parcel_status_history (parcel_id, status, updated_by, notes)
+       VALUES ($1, $2, $3, $4)`,
+      [parcelId, 'picked_up', req.user.id, 'Driver claimed parcel']
+    );
+
+    res.status(201).json({
+      message: 'Parcel claimed successfully',
+      assignment: assignmentResult.rows[0],
+    });
+  } catch (error) {
+    console.error('Claim parcel error:', error);
+    res.status(500).json({ error: 'Failed to claim parcel' });
+  }
+});
+
 // Update driver status
 router.put('/me/status', [
   body('status').isIn(['available', 'busy', 'offline'])

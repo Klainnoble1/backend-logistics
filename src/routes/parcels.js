@@ -97,20 +97,21 @@ router.post('/', [
       }
     }
 
-    // Create parcel
+    // Create parcel (store road distance for display)
     const result = await pool.query(
       `INSERT INTO parcels (
         tracking_id, sender_id, recipient_name, recipient_phone,
         pickup_address, delivery_address, parcel_type, weight,
         dimensions, service_type, status, price, insurance,
-        description, estimated_delivery_date
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        description, estimated_delivery_date, distance_km
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
       RETURNING *`,
       [
         trackingId, req.user.id, recipientName, recipientPhone,
         pickupAddress, deliveryAddress, parcelType, weight,
         JSON.stringify(dimensions || {}), serviceType, 'created',
-        pricing.price, insurance, description, estimatedDelivery
+        pricing.price, insurance, description, estimatedDelivery,
+        pricing.distance
       ]
     );
 

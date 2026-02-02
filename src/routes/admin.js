@@ -174,6 +174,7 @@ router.post('/pricing-rules', [
   body('basePrice').isFloat({ min: 0 }),
   body('pricePerKm').isFloat({ min: 0 }),
   body('pricePerKg').isFloat({ min: 0 }),
+  body('weightIncludedKg').optional().isFloat({ min: 0 }),
   body('expressSurcharge').isFloat({ min: 0 }),
   body('insuranceFee').isFloat({ min: 0 }),
   body('minPrice').isFloat({ min: 0 }),
@@ -191,6 +192,7 @@ router.post('/pricing-rules', [
       basePrice,
       pricePerKm,
       pricePerKg,
+      weightIncludedKg = 5,
       expressSurcharge,
       insuranceFee,
       minPrice,
@@ -205,11 +207,11 @@ router.post('/pricing-rules', [
 
     const result = await pool.query(
       `INSERT INTO pricing_rules (
-        rule_name, base_price, price_per_km, price_per_kg,
+        rule_name, base_price, price_per_km, price_per_kg, weight_included_kg,
         express_surcharge, insurance_fee, min_price, max_price, is_active
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING *`,
-      [ruleName, basePrice, pricePerKm, pricePerKg, expressSurcharge, insuranceFee, minPrice, maxPrice, isActive]
+      [ruleName, basePrice, pricePerKm, pricePerKg, weightIncludedKg, expressSurcharge, insuranceFee, minPrice, maxPrice, isActive]
     );
 
     res.status(201).json({
@@ -242,6 +244,7 @@ router.put('/pricing-rules/:id', [
   body('basePrice').optional().isFloat({ min: 0 }),
   body('pricePerKm').optional().isFloat({ min: 0 }),
   body('pricePerKg').optional().isFloat({ min: 0 }),
+  body('weightIncludedKg').optional().isFloat({ min: 0 }),
   body('expressSurcharge').optional().isFloat({ min: 0 }),
   body('insuranceFee').optional().isFloat({ min: 0 }),
   body('minPrice').optional().isFloat({ min: 0 }),

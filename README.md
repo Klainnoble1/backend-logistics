@@ -54,6 +54,21 @@ npm run migrate
 
 This will create all necessary tables and indexes.
 
+### Admin user (PHP admin + mobile app)
+
+Create an admin user in the same `users` table:
+
+```bash
+npm run seed
+```
+
+Default credential (change in production via env):
+
+- **Email:** `admin@oprime.com`
+- **Password:** `Admin123!`
+
+Override with env: **ADMIN_EMAIL**, **ADMIN_PASSWORD**, **ADMIN_NAME**. Use this login for the PHP admin panel and for the mobile app (Profile → Admin Dashboard).
+
 ## Deploy to Vercel
 
 1. Push this backend to a GitHub repo (see root of repo for git steps).

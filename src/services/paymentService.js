@@ -1,33 +1,67 @@
 const pool = require('../config/database');
 const axios = require('axios');
 
-// Initialize payment (Stripe example)
-async function initializePayment(parcelId, userId, amount, currency = 'USD') {
+const PAYSTACK_SECRET = process.env.PAYSTACK_SECRET_KEY;
+const PAYSTACK_BASE = 'https://api.paystack.co';
+
+// Initialize payment with Paystack
+async function initializePayment(parcelId, userId, amount, email, callbackUrl) {
   try {
     // Create payment record
     const paymentResult = await pool.query(
       `INSERT INTO payments (parcel_id, user_id, amount, payment_method, payment_status)
        VALUES ($1, $2, $3, $4, 'pending')
        RETURNING *`,
-      [parcelId, userId, amount, 'stripe']
+      [parcelId, userId, amount, 'paystack']
     );
 
     const payment = paymentResult.rows[0];
 
-    // Initialize Stripe payment (example - requires Stripe SDK)
-    // const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
-    // const paymentIntent = await stripe.paymentIntents.create({
-    //   amount: Math.round(amount * 100), // Convert to cents
-    //   currency: currency.toLowerCase(),
-    //   metadata: { parcelId, paymentId: payment.id },
-    // });
+    if (!PAYSTACK_SECRET) {
+      // No key: return payment record for testing (no redirect)
+      return {
+        paymentId: payment.id,
+        amount: payment.amount,
+        authorization_url: null,
+        message: 'Paystack not configured. Set PAYSTACK_SECRET_KEY.',
+      };
+    }
 
-    // For now, return payment record
-    // In production, return paymentIntent.client_secret for frontend
+    // Amount in kobo (NGN * 100)
+    const amountKobo = Math.round(parseFloat(amount) * 100);
+
+    const res = await axios.post(
+      `${PAYSTACK_BASE}/transaction/initialize`,
+      {
+        email: email || 'customer@example.com',
+        amount: amountKobo,
+        currency: 'NGN',
+        callback_url: callbackUrl || undefined,
+        metadata: {
+          parcel_id: parcelId,
+          payment_id: payment.id,
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${PAYSTACK_SECRET}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 10000,
+      }
+    );
+
+    const data = res.data?.data;
+    if (!data?.authorization_url) {
+      throw new Error(res.data?.message || 'Paystack did not return authorization URL');
+    }
+
     return {
       paymentId: payment.id,
       amount: payment.amount,
-      // clientSecret: paymentIntent.client_secret,
+      authorization_url: data.authorization_url,
+      access_code: data.access_code,
+      reference: data.reference,
     };
   } catch (error) {
     console.error('Initialize payment error:', error);
@@ -116,6 +150,7 @@ async function refundPayment(paymentId, amount) {
 module.exports = {
   initializePayment,
   confirmPayment,
+  verifyPaystackReference,
   handlePaymentWebhook,
   refundPayment,
 };

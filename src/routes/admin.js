@@ -39,6 +39,13 @@ router.get('/dashboard', async (req, res) => {
        WHERE status = 'available'`
     );
 
+    // Unassigned parcels (created, no assignment yet)
+    const unassignedCount = await pool.query(
+      `SELECT COUNT(*) as count FROM parcels p
+       WHERE p.status = 'created'
+       AND NOT EXISTS (SELECT 1 FROM assignments a WHERE a.parcel_id = p.id)`
+    );
+
     // Recent parcels
     const recentParcels = await pool.query(
       `SELECT p.*, u.full_name as sender_name
@@ -57,7 +64,8 @@ router.get('/dashboard', async (req, res) => {
         }, {}),
         totalRevenue: parseFloat(revenue.rows[0].total),
         totalDrivers: parseInt(totalDrivers.rows[0].count),
-        availableDrivers: parseInt(availableDrivers.rows[0].count)
+        availableDrivers: parseInt(availableDrivers.rows[0].count),
+        unassignedCount: parseInt(unassignedCount.rows[0].count)
       },
       recentParcels: recentParcels.rows
     });
@@ -74,9 +82,14 @@ router.get('/parcels', async (req, res) => {
     const offset = (page - 1) * limit;
 
     let query = `
-      SELECT p.*, u.full_name as sender_name, u.email as sender_email
+      SELECT p.*, u.full_name as sender_name, u.email as sender_email,
+             a.id as assignment_id, a.driver_id as assigned_driver_id,
+             du.full_name as assigned_driver_name
       FROM parcels p
       INNER JOIN users u ON p.sender_id = u.id
+      LEFT JOIN assignments a ON a.parcel_id = p.id
+      LEFT JOIN drivers dr ON dr.id = a.driver_id
+      LEFT JOIN users du ON du.id = dr.user_id
     `;
     const params = [];
     let paramCount = 1;

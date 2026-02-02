@@ -2,14 +2,36 @@ const express = require('express');
 const { body, validationResult } = require('express-validator');
 const pool = require('../config/database');
 const { authenticate } = require('../middleware/auth');
-const { initializePayment, confirmPayment, refundPayment } = require('../services/paymentService');
+const { initializePayment, confirmPayment, refundPayment, verifyPaystackReference } = require('../services/paymentService');
 
 const router = express.Router();
 
-// All routes require authentication
+// Paystack callback (no auth - user returns from Paystack redirect)
+router.get('/paystack-callback', async (req, res) => {
+  try {
+    const { reference } = req.query;
+    if (!reference) {
+      return res.redirect('/?payment=error&message=missing_reference');
+    }
+    const verified = await verifyPaystackReference(reference);
+    if (!verified.paymentId) {
+      return res.redirect('/?payment=error&message=invalid_metadata');
+    }
+    await confirmPayment(verified.paymentId, reference);
+    // Redirect to app (web: same origin; native: use deep link in production)
+    const appUrl = process.env.APP_URL || 'http://localhost:19006';
+    return res.redirect(`${appUrl}/?payment=success&reference=${reference}`);
+  } catch (error) {
+    console.error('Paystack callback error:', error);
+    const appUrl = process.env.APP_URL || 'http://localhost:19006';
+    return res.redirect(`${appUrl}/?payment=error&message=verification_failed`);
+  }
+});
+
+// All other routes require authentication
 router.use(authenticate);
 
-// Initialize payment
+// Initialize payment (Paystack)
 router.post('/initialize', [
   body('parcelId').isUUID(),
   body('amount').isFloat({ min: 0 }),
@@ -38,7 +60,11 @@ router.post('/initialize', [
       return res.status(400).json({ error: 'Amount mismatch' });
     }
 
-    const payment = await initializePayment(parcelId, req.user.id, amount);
+    const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+    const callbackUrl = `${baseUrl}/api/payments/paystack-callback`;
+    const email = req.user.email || 'customer@example.com';
+
+    const payment = await initializePayment(parcelId, req.user.id, amount, email, callbackUrl);
 
     res.json({
       message: 'Payment initialized',
@@ -46,7 +72,7 @@ router.post('/initialize', [
     });
   } catch (error) {
     console.error('Initialize payment error:', error);
-    res.status(500).json({ error: 'Failed to initialize payment' });
+    res.status(500).json({ error: error.response?.data?.message || 'Failed to initialize payment' });
   }
 });
 

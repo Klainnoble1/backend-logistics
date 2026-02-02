@@ -51,6 +51,35 @@ router.get('/track/:trackingId', async (req, res) => {
 // All other routes require authentication
 router.use(authenticate);
 
+// Estimate price (no parcel created)
+router.post('/estimate-price', [
+  body('pickupAddress').trim().notEmpty(),
+  body('deliveryAddress').trim().notEmpty(),
+  body('weight').isFloat({ min: 0.1 }),
+  body('serviceType').isIn(['standard', 'express']),
+  body('insurance').optional().isBoolean(),
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { pickupAddress, deliveryAddress, weight, serviceType, insurance = false } = req.body;
+
+    const pricing = await calculatePrice(pickupAddress, deliveryAddress, weight, serviceType, insurance);
+
+    res.json({
+      price: pricing.price,
+      breakdown: pricing.breakdown,
+      distance: pricing.distance,
+    });
+  } catch (error) {
+    console.error('Estimate price error:', error);
+    res.status(500).json({ error: error.message || 'Failed to estimate price' });
+  }
+});
+
 // Create new parcel
 router.post('/', [
   body('recipientName').trim().notEmpty(),

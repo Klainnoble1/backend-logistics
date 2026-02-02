@@ -107,6 +107,34 @@ async function handlePaymentWebhook(event) {
   }
 }
 
+// Verify Paystack transaction by reference; returns { paymentId } from metadata for callback
+async function verifyPaystackReference(reference) {
+  try {
+    if (!PAYSTACK_SECRET || !reference) {
+      return {};
+    }
+    const res = await axios.get(
+      `${PAYSTACK_BASE}/transaction/verify/${encodeURIComponent(reference)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${PAYSTACK_SECRET}`,
+          'Content-Type': 'application/json',
+        },
+        timeout: 10000,
+      }
+    );
+    const data = res.data?.data;
+    if (!res.data?.status || !data || data.status !== 'success') {
+      return {};
+    }
+    const paymentId = data.metadata?.payment_id || null;
+    return { paymentId };
+  } catch (error) {
+    console.error('Verify Paystack reference error:', error);
+    return {};
+  }
+}
+
 // Refund payment
 async function refundPayment(paymentId, amount) {
   try {

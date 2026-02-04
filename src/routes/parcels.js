@@ -266,23 +266,38 @@ router.get('/:id', async (req, res) => {
 
     // For customer: attach assignment delivery review (delivery_confirmed_at, rating, review_comment, driver name)
     if (req.user.role === 'customer') {
-      const assignmentResult = await pool.query(
-        `SELECT a.delivery_confirmed_at, a.rating, a.review_comment, u.full_name AS driver_name
-         FROM assignments a
-         JOIN drivers d ON a.driver_id = d.id
-         JOIN users u ON d.user_id = u.id
-         WHERE a.parcel_id = $1`,
-        [id]
-      );
-      if (assignmentResult.rows.length > 0) {
-        const a = assignmentResult.rows[0];
-        parcel = {
-          ...parcel,
-          delivery_confirmed_at: a.delivery_confirmed_at,
-          rating: a.rating,
-          review_comment: a.review_comment,
-          assigned_driver_name: a.driver_name
-        };
+      try {
+        const assignmentResult = await pool.query(
+          `SELECT a.delivery_confirmed_at, a.rating, a.review_comment, u.full_name AS driver_name
+           FROM assignments a
+           JOIN drivers d ON a.driver_id = d.id
+           JOIN users u ON d.user_id = u.id
+           WHERE a.parcel_id = $1`,
+          [id]
+        );
+        if (assignmentResult.rows.length > 0) {
+          const a = assignmentResult.rows[0];
+          parcel = {
+            ...parcel,
+            delivery_confirmed_at: a.delivery_confirmed_at,
+            rating: a.rating,
+            review_comment: a.review_comment,
+            assigned_driver_name: a.driver_name
+          };
+        }
+      } catch (assignErr) {
+        // Migration 005 may not be run yet (missing delivery_confirmed_at, rating, review_comment)
+        const fallbackResult = await pool.query(
+          `SELECT u.full_name AS driver_name
+           FROM assignments a
+           JOIN drivers d ON a.driver_id = d.id
+           JOIN users u ON d.user_id = u.id
+           WHERE a.parcel_id = $1`,
+          [id]
+        );
+        if (fallbackResult.rows.length > 0) {
+          parcel = { ...parcel, assigned_driver_name: fallbackResult.rows[0].driver_name };
+        }
       }
     }
 

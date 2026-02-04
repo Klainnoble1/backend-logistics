@@ -373,6 +373,24 @@ router.put('/pricing-rules/:id', [
   }
 });
 
+// Delete pricing rule
+router.delete('/pricing-rules/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      'DELETE FROM pricing_rules WHERE id = $1 RETURNING id',
+      [id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Pricing rule not found' });
+    }
+    res.json({ message: 'Pricing rule deleted successfully' });
+  } catch (error) {
+    console.error('Delete pricing rule error:', error);
+    res.status(500).json({ error: 'Failed to delete pricing rule' });
+  }
+});
+
 module.exports = router;
 
 

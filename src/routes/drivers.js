@@ -43,6 +43,38 @@ router.get('/available', authorize('admin'), async (req, res) => {
   }
 });
 
+// Get driver's own profile (including availability status)
+router.get('/me', authorize('driver'), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT d.id, d.status, d.license_number, d.vehicle_type, d.vehicle_plate, u.full_name, u.email, u.phone
+       FROM drivers d
+       INNER JOIN users u ON d.user_id = u.id
+       WHERE d.user_id = $1`,
+      [req.user.id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Driver profile not found' });
+    }
+    const row = result.rows[0];
+    res.json({
+      driver: {
+        id: row.id,
+        status: row.status,
+        licenseNumber: row.license_number,
+        vehicleType: row.vehicle_type,
+        vehiclePlate: row.vehicle_plate,
+        fullName: row.full_name,
+        email: row.email,
+        phone: row.phone,
+      },
+    });
+  } catch (error) {
+    console.error('Get driver me error:', error);
+    res.status(500).json({ error: 'Failed to get driver profile' });
+  }
+});
+
 // Get driver's own assignments
 router.get('/me/assignments', authorize('driver'), async (req, res) => {
   try {
@@ -285,8 +317,12 @@ router.post('/:driverId/assign', [
       return res.status(404).json({ error: 'Driver not found' });
     }
 
-    if (driverResult.rows[0].status !== 'available') {
-      return res.status(400).json({ error: 'Driver is not available' });
+    const driverStatus = driverResult.rows[0].status;
+    if (driverStatus === 'busy') {
+      return res.status(400).json({ error: 'Driver is busy with another delivery' });
+    }
+    if (driverStatus !== 'available' && driverStatus !== 'offline') {
+      return res.status(400).json({ error: 'Driver is not available for assignment' });
     }
 
     // Check if parcel exists and is not already assigned

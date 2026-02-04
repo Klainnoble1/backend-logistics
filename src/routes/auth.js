@@ -166,6 +166,64 @@ router.get('/me', authenticate, async (req, res) => {
   }
 });
 
+// Update profile (fullName, phone)
+router.put('/profile', [
+  body('fullName').optional().trim().notEmpty(),
+  body('phone').optional().trim(),
+], authenticate, async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { fullName, phone } = req.body;
+    const updates = [];
+    const values = [];
+    let paramCount = 1;
+
+    if (fullName !== undefined) {
+      updates.push(`full_name = $${paramCount++}`);
+      values.push(fullName);
+    }
+    if (phone !== undefined) {
+      updates.push(`phone = $${paramCount++}`);
+      values.push(phone === '' ? null : phone);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    values.push(req.user.id);
+    const result = await pool.query(
+      `UPDATE users SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $${paramCount}
+       RETURNING id, email, phone, full_name, role, created_at`,
+      values
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const dbUser = result.rows[0];
+    res.json({
+      user: {
+        id: dbUser.id,
+        email: dbUser.email,
+        fullName: dbUser.full_name,
+        phone: dbUser.phone,
+        role: dbUser.role,
+        createdAt: dbUser.created_at
+      }
+    });
+  } catch (error) {
+    console.error('Update profile error:', error);
+    res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
 // Password reset request (simplified - in production, send email)
 router.post('/password-reset', [
   body('email').isEmail().normalizeEmail()

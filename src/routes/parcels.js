@@ -251,6 +251,19 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Parcel not found' });
     }
 
+    let parcel = result.rows[0];
+
+    // For admin, attach sender info
+    if (req.user.role === 'admin' && parcel.sender_id) {
+      const senderResult = await pool.query(
+        'SELECT full_name, email FROM users WHERE id = $1',
+        [parcel.sender_id]
+      );
+      if (senderResult.rows.length > 0) {
+        parcel = { ...parcel, sender_name: senderResult.rows[0].full_name, sender_email: senderResult.rows[0].email };
+      }
+    }
+
     // Get status history
     const historyResult = await pool.query(
       `SELECT psh.*, u.full_name as updated_by_name
@@ -262,7 +275,7 @@ router.get('/:id', async (req, res) => {
     );
 
     res.json({
-      parcel: result.rows[0],
+      parcel,
       statusHistory: historyResult.rows
     });
   } catch (error) {

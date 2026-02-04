@@ -264,6 +264,28 @@ router.get('/:id', async (req, res) => {
       }
     }
 
+    // For customer: attach assignment delivery review (delivery_confirmed_at, rating, review_comment, driver name)
+    if (req.user.role === 'customer') {
+      const assignmentResult = await pool.query(
+        `SELECT a.delivery_confirmed_at, a.rating, a.review_comment, u.full_name AS driver_name
+         FROM assignments a
+         JOIN drivers d ON a.driver_id = d.id
+         JOIN users u ON d.user_id = u.id
+         WHERE a.parcel_id = $1`,
+        [id]
+      );
+      if (assignmentResult.rows.length > 0) {
+        const a = assignmentResult.rows[0];
+        parcel = {
+          ...parcel,
+          delivery_confirmed_at: a.delivery_confirmed_at,
+          rating: a.rating,
+          review_comment: a.review_comment,
+          assigned_driver_name: a.driver_name
+        };
+      }
+    }
+
     // Get status history
     const historyResult = await pool.query(
       `SELECT psh.*, u.full_name as updated_by_name
@@ -281,6 +303,62 @@ router.get('/:id', async (req, res) => {
   } catch (error) {
     console.error('Get parcel error:', error);
     res.status(500).json({ error: 'Failed to get parcel' });
+  }
+});
+
+// Confirm delivery and rate rider (customer/sender only, parcel must be delivered)
+router.post('/:id/confirm-delivery', [
+  body('rating').isInt({ min: 1, max: 5 }),
+  body('reviewComment').optional().trim()
+], authorize('customer'), async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { id } = req.params;
+    const { rating, reviewComment } = req.body;
+
+    const parcelResult = await pool.query(
+      'SELECT * FROM parcels WHERE id = $1 AND sender_id = $2',
+      [id, req.user.id]
+    );
+
+    if (parcelResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Parcel not found or access denied' });
+    }
+
+    const parcel = parcelResult.rows[0];
+    if (parcel.status !== 'delivered') {
+      return res.status(400).json({ error: 'Can only confirm delivery for parcels with status delivered' });
+    }
+
+    const assignmentResult = await pool.query(
+      'SELECT id FROM assignments WHERE parcel_id = $1',
+      [id]
+    );
+
+    if (assignmentResult.rows.length === 0) {
+      return res.status(400).json({ error: 'No assignment found for this parcel' });
+    }
+
+    await pool.query(
+      `UPDATE assignments
+       SET delivery_confirmed_at = CURRENT_TIMESTAMP, rating = $1, review_comment = $2, updated_at = CURRENT_TIMESTAMP
+       WHERE parcel_id = $3`,
+      [rating, reviewComment || null, id]
+    );
+
+    res.json({
+      message: 'Delivery confirmed and review submitted',
+      deliveryConfirmedAt: new Date().toISOString(),
+      rating,
+      reviewComment: reviewComment || null
+    });
+  } catch (error) {
+    console.error('Confirm delivery error:', error);
+    res.status(500).json({ error: 'Failed to confirm delivery' });
   }
 });
 

@@ -90,9 +90,14 @@ router.get('/me/assignments', authorize('driver'), async (req, res) => {
 
     const driverId = driverResult.rows[0].id;
 
-    // Get assignments with parcel details
+    // Get assignments with parcel details (alias a.id so it's not overwritten by p.id)
     const result = await pool.query(
-      `SELECT a.*, p.*, u.full_name as sender_name, u.email as sender_email
+      `SELECT a.id as assignment_id, a.parcel_id, a.driver_id, a.assigned_at, a.assigned_by, a.status as assignment_status,
+              p.id as parcel_id, p.tracking_id, p.sender_id, p.recipient_name, p.recipient_phone,
+              p.pickup_address, p.delivery_address, p.parcel_type, p.weight, p.dimensions,
+              p.service_type, p.status as parcel_status, p.current_location, p.estimated_delivery_date,
+              p.actual_delivery_date, p.price, p.insurance, p.description, p.created_at as parcel_created_at, p.updated_at as parcel_updated_at,
+              u.full_name as sender_name, u.email as sender_email
        FROM assignments a
        INNER JOIN parcels p ON a.parcel_id = p.id
        INNER JOIN users u ON p.sender_id = u.id
@@ -101,7 +106,53 @@ router.get('/me/assignments', authorize('driver'), async (req, res) => {
       [driverId]
     );
 
-    res.json({ assignments: result.rows });
+    const assignments = result.rows.map((r) => ({
+      id: r.assignment_id,
+      parcel_id: r.parcel_id,
+      driver_id: r.driver_id,
+      assigned_at: r.assigned_at,
+      assigned_by: r.assigned_by,
+      status: r.assignment_status,
+      parcel: {
+        id: r.parcel_id,
+        tracking_id: r.tracking_id,
+        trackingId: r.tracking_id,
+        sender_id: r.sender_id,
+        recipient_name: r.recipient_name,
+        recipientName: r.recipient_name,
+        recipient_phone: r.recipient_phone,
+        recipientPhone: r.recipient_phone,
+        pickup_address: r.pickup_address,
+        pickupAddress: r.pickup_address,
+        delivery_address: r.delivery_address,
+        deliveryAddress: r.delivery_address,
+        parcel_type: r.parcel_type,
+        weight: r.weight,
+        dimensions: r.dimensions,
+        service_type: r.service_type,
+        serviceType: r.service_type,
+        status: r.parcel_status,
+        current_location: r.current_location,
+        currentLocation: r.current_location,
+        estimated_delivery_date: r.estimated_delivery_date,
+        estimatedDeliveryDate: r.estimated_delivery_date,
+        actual_delivery_date: r.actual_delivery_date,
+        actualDeliveryDate: r.actual_delivery_date,
+        price: r.price,
+        insurance: r.insurance,
+        description: r.description,
+        created_at: r.parcel_created_at,
+        createdAt: r.parcel_created_at,
+        updated_at: r.parcel_updated_at,
+        updatedAt: r.parcel_updated_at,
+        sender_name: r.sender_name,
+        senderName: r.sender_name,
+        sender_email: r.sender_email,
+        senderEmail: r.sender_email,
+      },
+    }));
+
+    res.json({ assignments });
   } catch (error) {
     console.error('Get assignments error:', error);
     res.status(500).json({ error: 'Failed to get assignments' });
@@ -317,13 +368,7 @@ router.post('/:driverId/assign', [
       return res.status(404).json({ error: 'Driver not found' });
     }
 
-    const driverStatus = driverResult.rows[0].status;
-    if (driverStatus === 'busy') {
-      return res.status(400).json({ error: 'Driver is busy with another delivery' });
-    }
-    if (driverStatus !== 'available' && driverStatus !== 'offline') {
-      return res.status(400).json({ error: 'Driver is not available for assignment' });
-    }
+    // Allow assigning multiple parcels to the same driver (no status check)
 
     // Check if parcel exists and is not already assigned
     const parcelResult = await pool.query(

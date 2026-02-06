@@ -109,9 +109,13 @@ router.get('/me/assignments', authorize('driver'), async (req, res) => {
     const assignments = result.rows.map((r) => ({
       id: r.assignment_id,
       parcel_id: r.parcel_id,
+      parcelId: r.parcel_id,
       driver_id: r.driver_id,
+      driverId: r.driver_id,
       assigned_at: r.assigned_at,
+      assignedAt: r.assigned_at,
       assigned_by: r.assigned_by,
+      assignedBy: r.assigned_by,
       status: r.assignment_status,
       parcel: {
         id: r.parcel_id,

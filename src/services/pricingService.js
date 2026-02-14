@@ -1,7 +1,10 @@
 const pool = require('../config/database');
 const axios = require('axios');
 
-// Nominatim (OpenStreetMap) - no API key required. Use 1 req/sec.
+// Mapbox - better coverage in Nigeria. Token in MAPBOX_ACCESS_TOKEN.
+const MAPBOX_BASE = 'https://api.mapbox.com/geocoding/v5/mapbox.places';
+
+// Nominatim (OpenStreetMap) - fallback, no API key. Use 1 req/sec.
 const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org/search';
 const USER_AGENT = 'OprimeLogistics/1.0 (contact@example.com)';
 
@@ -9,8 +12,24 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Geocode one address via OpenStreetMap Nominatim */
+/** Geocode one address via Mapbox (when token set) or Nominatim (fallback). Returns { lat, lon } or null. */
 async function geocodeAddress(address) {
+  const mapboxToken = process.env.MAPBOX_ACCESS_TOKEN;
+  if (mapboxToken) {
+    try {
+      const url = `${MAPBOX_BASE}/${encodeURIComponent(address)}.json`;
+      const res = await axios.get(url, {
+        params: { access_token: mapboxToken, limit: 1, country: 'NG' },
+        timeout: 10000,
+      });
+      if (res.data?.features?.length > 0) {
+        const [lon, lat] = res.data.features[0].center;
+        return { lat: parseFloat(lat), lon: parseFloat(lon) };
+      }
+    } catch (err) {
+      console.warn('Mapbox geocode failed, falling back to Nominatim:', err.message);
+    }
+  }
   const res = await axios.get(NOMINATIM_BASE, {
     params: { q: address, format: 'json', limit: 1 },
     headers: { 'User-Agent': USER_AGENT },
@@ -62,7 +81,7 @@ async function getRoadDistanceAndDuration(pickup, delivery) {
 async function calculateDistance(pickupAddress, deliveryAddress) {
   try {
     const pickup = await geocodeAddress(pickupAddress);
-    await sleep(1100);
+    if (!process.env.MAPBOX_ACCESS_TOKEN) await sleep(1100);
     const delivery = await geocodeAddress(deliveryAddress);
 
     if (!pickup || !delivery) {

@@ -22,15 +22,24 @@ router.post('/register', [
     }
 
     const { email, password, fullName, phone, role = 'customer' } = req.body;
+    const phoneVal = phone != null && String(phone).trim() !== '' ? String(phone).trim() : null;
 
-    // Check if user exists
-    const existingUser = await pool.query(
-      'SELECT id FROM users WHERE email = $1 OR phone = $2',
-      [email, phone]
-    );
+    // Check if user exists (email always; phone only when provided)
+    let existingUser;
+    if (phoneVal) {
+      existingUser = await pool.query(
+        'SELECT id FROM users WHERE email = $1 OR phone = $2',
+        [email, phoneVal]
+      );
+    } else {
+      existingUser = await pool.query(
+        'SELECT id FROM users WHERE email = $1',
+        [email]
+      );
+    }
 
     if (existingUser.rows.length > 0) {
-      return res.status(400).json({ error: 'User already exists' });
+      return res.status(400).json({ error: 'A user with this email or phone already exists' });
     }
 
     // Hash password
@@ -41,7 +50,7 @@ router.post('/register', [
       `INSERT INTO users (email, phone, password_hash, full_name, role)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING id, email, full_name, role, created_at`,
-      [email, phone, passwordHash, fullName, role]
+      [email, phoneVal, passwordHash, fullName, role]
     );
 
     const user = result.rows[0];

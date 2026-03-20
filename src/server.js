@@ -7,13 +7,17 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf.toString();
+  },
+}));
 app.use(express.urlencoded({ extended: true }));
 
 // Root – show API info (so base URL isn’t “Route not found”)
 app.get('/', (req, res) => {
   res.json({
-    name: 'Oprime Logistics API',
+    name: 'Naomi Logistics API',
     status: 'ok',
     docs: {
       health: '/health',
@@ -31,6 +35,8 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/parcels', require('./routes/parcels'));
 app.use('/api/drivers', require('./routes/drivers'));
 app.use('/api/admin', require('./routes/admin'));
+app.use('/api/notifications', require('./routes/notifications'));
+app.use('/api/addresses', require('./routes/addresses'));
 // Lazy-load payments so a paymentService load error doesn't crash the whole API
 app.use('/api/payments', (req, res, next) => {
   try {
@@ -44,7 +50,7 @@ app.use('/api/payments', (req, res, next) => {
 
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', message: 'Oprime Logistics API is running' });
+  res.json({ status: 'ok', message: 'Naomi Logistics API is running' });
 });
 
 // Error handling middleware
@@ -72,4 +78,3 @@ if (require.main === module) {
 }
 
 module.exports = app;
-

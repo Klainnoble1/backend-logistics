@@ -2,6 +2,8 @@ const express = require('express');
 const { body, validationResult } = require('express-validator');
 const pool = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
+const { notifyDriverAssignment } = require('../services/notificationService');
+const { hasCompletedPaymentForParcel } = require('../services/paymentService');
 
 const router = express.Router();
 
@@ -102,6 +104,12 @@ router.get('/me/assignments', authorize('driver'), async (req, res) => {
        INNER JOIN parcels p ON a.parcel_id = p.id
        INNER JOIN users u ON p.sender_id = u.id
        WHERE a.driver_id = $1
+         AND EXISTS (
+           SELECT 1
+           FROM payments pay
+           WHERE pay.parcel_id = p.id
+             AND pay.payment_status = 'completed'
+         )
        ORDER BY a.assigned_at DESC`,
       [driverId]
     );
@@ -174,6 +182,12 @@ router.get('/me/available-parcels', authorize('driver'), async (req, res) => {
        FROM parcels p
        INNER JOIN users u ON p.sender_id = u.id
        WHERE p.status = 'created'
+         AND EXISTS (
+           SELECT 1
+           FROM payments pay
+           WHERE pay.parcel_id = p.id
+             AND pay.payment_status = 'completed'
+         )
          AND NOT EXISTS (SELECT 1 FROM assignments a WHERE a.parcel_id = p.id)
        ORDER BY p.created_at DESC`
     );
@@ -238,6 +252,11 @@ router.post('/me/claim', [
       return res.status(400).json({ error: 'Parcel is not available for delivery' });
     }
 
+    const hasCompletedPayment = await hasCompletedPaymentForParcel(parcelId);
+    if (!hasCompletedPayment) {
+      return res.status(400).json({ error: 'Parcel is awaiting payment confirmation' });
+    }
+
     const assignmentCheck = await pool.query(
       'SELECT id FROM assignments WHERE parcel_id = $1',
       [parcelId]
@@ -268,6 +287,10 @@ router.post('/me/claim', [
       `INSERT INTO parcel_status_history (parcel_id, status, updated_by, notes)
        VALUES ($1, $2, $3, $4)`,
       [parcelId, 'picked_up', req.user.id, 'Driver claimed parcel']
+    );
+
+    notifyDriverAssignment(driverId, parcelId).catch((err) =>
+      console.error('Notify driver assignment failed:', err)
     );
 
     res.status(201).json({
@@ -372,7 +395,7 @@ router.post('/:driverId/assign', [
       return res.status(404).json({ error: 'Driver not found' });
     }
 
-    // Allow assigning multiple parcels to the same driver (no status check)
+    // Allow assigning multiple parcels to the same driver, but only once a parcel is paid and still unassigned.
 
     // Check if parcel exists and is not already assigned
     const parcelResult = await pool.query(
@@ -382,6 +405,15 @@ router.post('/:driverId/assign', [
 
     if (parcelResult.rows.length === 0) {
       return res.status(404).json({ error: 'Parcel not found' });
+    }
+
+    if (parcelResult.rows[0].status !== 'created') {
+      return res.status(400).json({ error: 'Parcel is not available for assignment' });
+    }
+
+    const hasCompletedPayment = await hasCompletedPaymentForParcel(parcelId);
+    if (!hasCompletedPayment) {
+      return res.status(400).json({ error: 'Parcel is awaiting payment confirmation' });
     }
 
     const assignmentCheck = await pool.query(
@@ -418,6 +450,10 @@ router.post('/:driverId/assign', [
       `INSERT INTO parcel_status_history (parcel_id, status, updated_by, notes)
        VALUES ($1, $2, $3, $4)`,
       [parcelId, 'picked_up', req.user.id, 'Parcel assigned to driver']
+    );
+
+    notifyDriverAssignment(driverId, parcelId).catch((err) =>
+      console.error('Notify driver assignment failed:', err)
     );
 
     res.status(201).json({

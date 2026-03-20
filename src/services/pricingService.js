@@ -23,21 +23,34 @@ async function geocodeAddress(address) {
         timeout: 10000,
       });
       if (res.data?.features?.length > 0) {
-        const [lon, lat] = res.data.features[0].center;
-        return { lat: parseFloat(lat), lon: parseFloat(lon) };
+        const feature = res.data.features[0];
+        const [lon, lat] = feature.center;
+        
+        // Extract state from Mapbox context
+        let state = null;
+        if (feature.context) {
+          const region = feature.context.find(ctx => ctx.id.startsWith('region.'));
+          if (region) state = region.text;
+        }
+
+        return { lat: parseFloat(lat), lon: parseFloat(lon), state };
       }
     } catch (err) {
       console.warn('Mapbox geocode failed, falling back to Nominatim:', err.message);
     }
   }
   const res = await axios.get(NOMINATIM_BASE, {
-    params: { q: address, format: 'json', limit: 1 },
+    params: { q: address, format: 'json', limit: 1, addressdetails: 1 },
     headers: { 'User-Agent': USER_AGENT },
     timeout: 10000,
   });
   if (!res.data || res.data.length === 0) return null;
   const first = res.data[0];
-  return { lat: parseFloat(first.lat), lon: parseFloat(first.lon) };
+  return { 
+    lat: parseFloat(first.lat), 
+    lon: parseFloat(first.lon),
+    state: first.address?.state || first.address?.province || null
+  };
 }
 
 /** Haversine distance in km (fallback when OSRM unavailable) */
@@ -86,24 +99,28 @@ async function calculateDistance(pickupAddress, deliveryAddress) {
 
     if (!pickup || !delivery) {
       console.warn('Geocoding failed for one or both addresses, using default distance');
-      return { distanceKm: 10, durationMinutes: null };
+      return { distanceKm: 10, durationMinutes: null, pickupState: null, deliveryState: null };
     }
 
     const road = await getRoadDistanceAndDuration(pickup, delivery);
-    if (road) return { distanceKm: road.distanceKm, durationMinutes: road.durationMinutes };
+    if (road) return { ...road, pickupState: pickup.state, deliveryState: delivery.state };
 
     const fallbackKm = haversineKm(pickup, delivery);
-    return { distanceKm: Math.round(fallbackKm * 10) / 10, durationMinutes: null };
+    return { 
+      distanceKm: Math.round(fallbackKm * 10) / 10, 
+      durationMinutes: null,
+      pickupState: pickup.state,
+      deliveryState: delivery.state
+    };
   } catch (error) {
     console.error('Distance calculation error:', error.message);
-    return { distanceKm: 10, durationMinutes: null };
+    return { distanceKm: 10, durationMinutes: null, pickupState: null, deliveryState: null };
   }
 }
 
 // Calculate parcel price
 async function calculatePrice(pickupAddress, deliveryAddress, weight, serviceType, insurance) {
   try {
-    // Get active pricing rule
     const result = await pool.query(
       'SELECT * FROM pricing_rules WHERE is_active = true ORDER BY created_at DESC LIMIT 1'
     );
@@ -113,34 +130,68 @@ async function calculatePrice(pickupAddress, deliveryAddress, weight, serviceTyp
     }
 
     const pricingRule = result.rows[0];
-
-    // Calculate road distance (OSRM) or fallback to straight-line
-    const { distanceKm, durationMinutes } = await calculateDistance(pickupAddress, deliveryAddress);
+    const { distanceKm, pickupState, deliveryState } = await calculateDistance(pickupAddress, deliveryAddress);
     const distance = distanceKm;
 
-    // Calculate base price
-    let price = parseFloat(pricingRule.base_price);
+    let price = 0;
+    const breakdown = {};
 
-    // Distance-based: Naira per km (₦300/km)
-    price += distance * parseFloat(pricingRule.price_per_km);
+    // Check if Interstate
+    const isInterstate = pickupState && deliveryState && pickupState !== deliveryState;
+    let interstateBasePrice = null;
 
-    // Weight: first 5 kg included, then ₦300 per kg after (configurable via weight_included_kg / price_per_kg)
+    if (isInterstate) {
+      // Find fixed interstate rate
+      const interstateResult = await pool.query(
+        'SELECT price FROM state_pricing WHERE origin_state = $1 AND destination_state = $2 AND is_active = true',
+        [pickupState, deliveryState]
+      );
+      
+      if (interstateResult.rows.length > 0) {
+        interstateBasePrice = parseFloat(interstateResult.rows[0].price);
+      }
+    }
+
+    if (isInterstate && interstateBasePrice !== null) {
+      // Interstate Formula: Pickup Intra + Interstate Travel + Delivery Intra
+      const pickupFee = parseFloat(pricingRule.intra_state_pickup_fee || 0);
+      const deliveryFee = parseFloat(pricingRule.intra_state_delivery_fee || 0);
+      
+      price = pickupFee + interstateBasePrice + deliveryFee;
+      
+      breakdown.interstate_base = interstateBasePrice;
+      breakdown.intra_state_pickup = pickupFee;
+      breakdown.intra_state_delivery = deliveryFee;
+    } else {
+      // Intra-state / Distance-based Formula
+      price = parseFloat(pricingRule.base_price);
+      price += distance * parseFloat(pricingRule.price_per_km);
+      
+      breakdown.base = parseFloat(pricingRule.base_price);
+      breakdown.distance = distance * parseFloat(pricingRule.price_per_km);
+    }
+
+    // Weight charge (applies to both if enabled)
     const includedKg = (pricingRule.weight_included_kg != null ? parseFloat(pricingRule.weight_included_kg) : 5);
     const perKgAfter = parseFloat(pricingRule.price_per_kg);
     const weightCharge = weight <= includedKg ? 0 : (weight - includedKg) * perKgAfter;
     price += weightCharge;
+    breakdown.weight = weightCharge;
 
-    // Add express surcharge
+    // Surcharges
     if (serviceType === 'express') {
-      price += parseFloat(pricingRule.express_surcharge);
+      const expressFee = parseFloat(pricingRule.express_surcharge);
+      price += expressFee;
+      breakdown.express = expressFee;
     }
 
-    // Add insurance fee
     if (insurance) {
-      price += parseFloat(pricingRule.insurance_fee);
+      const insuranceFee = parseFloat(pricingRule.insurance_fee);
+      price += insuranceFee;
+      breakdown.insurance = insuranceFee;
     }
 
-    // Apply min/max constraints
+    // Constraints
     if (price < parseFloat(pricingRule.min_price)) {
       price = parseFloat(pricingRule.min_price);
     }
@@ -149,15 +200,9 @@ async function calculatePrice(pickupAddress, deliveryAddress, weight, serviceTyp
     }
 
     return {
-      price: Math.round(price * 100) / 100, // Round to 2 decimals
+      price: Math.round(price * 100) / 100,
       distance,
-      breakdown: {
-        base: parseFloat(pricingRule.base_price),
-        distance: distance * parseFloat(pricingRule.price_per_km),
-        weight: weightCharge,
-        express: serviceType === 'express' ? parseFloat(pricingRule.express_surcharge) : 0,
-        insurance: insurance ? parseFloat(pricingRule.insurance_fee) : 0
-      }
+      breakdown
     };
   } catch (error) {
     console.error('Price calculation error:', error);

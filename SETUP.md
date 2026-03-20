@@ -60,7 +60,7 @@ Expected response:
 ```json
 {
   "status": "ok",
-  "message": "Oprime Logistics API is running"
+  "message": "Naomi Logistics API is running"
 }
 ```
 

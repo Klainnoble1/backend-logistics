@@ -1,6 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { body, validationResult } = require('express-validator');
 const pool = require('../config/database');
 const { authenticate } = require('../middleware/auth');
@@ -145,6 +146,33 @@ router.post('/login', [
   }
 });
 
+// Register Expo push token for the current user (for push notifications with sound)
+router.post('/push-token', [
+  body('expoPushToken').trim().notEmpty(),
+  body('deviceId').optional().trim(),
+], authenticate, async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+    const { expoPushToken, deviceId } = req.body;
+    if (!expoPushToken.startsWith('ExponentPushToken')) {
+      return res.status(400).json({ error: 'Invalid Expo push token' });
+    }
+    await pool.query(
+      `INSERT INTO user_push_tokens (user_id, expo_push_token, device_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (user_id, expo_push_token) DO UPDATE SET updated_at = CURRENT_TIMESTAMP`,
+      [req.user.id, expoPushToken, deviceId || null]
+    );
+    res.json({ message: 'Push token registered' });
+  } catch (error) {
+    console.error('Push token error:', error);
+    res.status(500).json({ error: 'Failed to register push token' });
+  }
+});
+
 // Get current user
 router.get('/me', authenticate, async (req, res) => {
   try {
@@ -233,7 +261,7 @@ router.put('/profile', [
   }
 });
 
-// Password reset request (simplified - in production, send email)
+// Password reset request – generates token and stores it; in production send email with link
 router.post('/password-reset', [
   body('email').isEmail().normalizeEmail()
 ], async (req, res) => {
@@ -251,16 +279,88 @@ router.post('/password-reset', [
     );
 
     if (result.rows.length === 0) {
-      // Don't reveal if email exists
-      return res.json({ message: 'If email exists, password reset link sent' });
+      return res.json({ message: 'If that email is registered, you will receive reset instructions.' });
     }
 
-    // TODO: Generate reset token and send email
-    // For now, just return success
-    res.json({ message: 'Password reset link sent (not implemented yet)' });
+    const userId = result.rows[0].id;
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+    await pool.query(
+      'INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
+      [userId, token, expiresAt]
+    );
+
+    // Send email when configured; otherwise user gets the code from the API response (in-app).
+    let emailSent = false;
+    if (process.env.SEND_RESET_EMAIL === 'true' && process.env.NODEMAILER_TRANSPORT) {
+      try {
+        const nodemailer = require('nodemailer');
+        const transporter = nodemailer.createTransport(JSON.parse(process.env.NODEMAILER_TRANSPORT));
+        const appUrl = process.env.APP_URL || 'http://localhost:19006';
+        await transporter.sendMail({
+          from: process.env.RESET_EMAIL_FROM || 'noreply@example.com',
+          to: email,
+          subject: 'Password reset – Naomi Logistics',
+          text: `Use this token in the app to set a new password: ${token}\nOr open: ${appUrl}/reset-password?token=${token}`,
+        });
+        emailSent = true;
+      } catch (mailErr) {
+        console.error('Send reset email error:', mailErr);
+      }
+    }
+
+    // Return token in response when email was not sent so the app can show the code (dev or no email config).
+    const includeToken = !emailSent;
+    res.json({
+      message: 'If that email is registered, you will receive reset instructions.',
+      ...(includeToken && { resetToken: token })
+    });
   } catch (error) {
     console.error('Password reset error:', error);
     res.status(500).json({ error: 'Password reset failed' });
+  }
+});
+
+// Set new password using reset token (no auth required)
+router.post('/set-password', [
+  body('token').trim().notEmpty(),
+  body('newPassword').isLength({ min: 6 })
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { token, newPassword } = req.body;
+
+    const tokenRow = await pool.query(
+      `SELECT id, user_id FROM password_reset_tokens
+       WHERE token = $1 AND expires_at > CURRENT_TIMESTAMP AND used_at IS NULL`,
+      [token]
+    );
+
+    if (tokenRow.rows.length === 0) {
+      return res.status(400).json({ error: 'Invalid or expired reset token' });
+    }
+
+    const { id: tokenId, user_id: userId } = tokenRow.rows[0];
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+
+    await pool.query(
+      'UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      [passwordHash, userId]
+    );
+    await pool.query(
+      'UPDATE password_reset_tokens SET used_at = CURRENT_TIMESTAMP WHERE id = $1',
+      [tokenId]
+    );
+
+    res.json({ message: 'Password updated successfully. You can now sign in.' });
+  } catch (error) {
+    console.error('Set password error:', error);
+    res.status(500).json({ error: 'Failed to set password' });
   }
 });
 

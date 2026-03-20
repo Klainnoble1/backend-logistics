@@ -4,6 +4,7 @@ const pool = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const generateTrackingId = require('../utils/generateTrackingId');
 const { calculatePrice, estimateDeliveryDate } = require('../services/pricingService');
+const { notifyStatusUpdate, notifyDriverReview } = require('../services/notificationService');
 
 const router = express.Router();
 
@@ -350,7 +351,7 @@ router.post('/:id/confirm-delivery', [
     }
 
     const assignmentResult = await pool.query(
-      'SELECT id FROM assignments WHERE parcel_id = $1',
+      'SELECT id, driver_id FROM assignments WHERE parcel_id = $1',
       [id]
     );
 
@@ -358,11 +359,17 @@ router.post('/:id/confirm-delivery', [
       return res.status(400).json({ error: 'No assignment found for this parcel' });
     }
 
+    const assignment = assignmentResult.rows[0];
+
     await pool.query(
       `UPDATE assignments
        SET delivery_confirmed_at = CURRENT_TIMESTAMP, rating = $1, review_comment = $2, updated_at = CURRENT_TIMESTAMP
        WHERE parcel_id = $3`,
       [rating, reviewComment || null, id]
+    );
+
+    notifyDriverReview(assignment.driver_id, id, rating, reviewComment || null).catch((err) =>
+      console.error('Notify driver review failed:', err)
     );
 
     res.json({
@@ -440,6 +447,19 @@ router.put('/:id/status', [
       `INSERT INTO parcel_status_history (parcel_id, status, location, updated_by, notes)
        VALUES ($1, $2, $3, $4, $5)`,
       [id, status, location || parcel.current_location, req.user.id, notes || '']
+    );
+
+    // When delivered, set assignment status to completed
+    if (status === 'delivered') {
+      await pool.query(
+        `UPDATE assignments SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE parcel_id = $1`,
+        [id]
+      );
+    }
+
+    // Notify sender about status update (non-blocking)
+    notifyStatusUpdate(id, status, parcel.sender_id).catch((err) =>
+      console.error('Notify status update failed:', err)
     );
 
     res.json({

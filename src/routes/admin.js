@@ -98,7 +98,36 @@ router.get('/dashboard', async (req, res) => {
     const unassignedCount = await pool.query(
       `SELECT COUNT(*) as count FROM parcels p
        WHERE p.status = 'created'
+       AND EXISTS (
+         SELECT 1
+         FROM payments pay
+         WHERE pay.parcel_id = p.id
+           AND pay.payment_status = 'completed'
+       )
        AND NOT EXISTS (SELECT 1 FROM assignments a WHERE a.parcel_id = p.id)`
+    );
+
+    // Parcels still awaiting a successful payment are tracked operationally as pending payments.
+    const pendingPayments = await pool.query(
+      `SELECT COUNT(*) as count
+       FROM parcels p
+       WHERE EXISTS (
+         SELECT 1
+         FROM payments pay
+         WHERE pay.parcel_id = p.id
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM payments pay
+         WHERE pay.parcel_id = p.id
+           AND pay.payment_status = 'completed'
+       )`
+    );
+
+    const completedPayments = await pool.query(
+      `SELECT COUNT(DISTINCT parcel_id) as count
+       FROM payments
+       WHERE payment_status = 'completed'`
     );
 
     // Recent parcels
@@ -108,6 +137,17 @@ router.get('/dashboard', async (req, res) => {
        INNER JOIN users u ON p.sender_id = u.id
        ORDER BY p.created_at DESC
        LIMIT 10`
+    );
+
+    // Recent payments
+    const recentPayments = await pool.query(
+      `SELECT pay.id, pay.amount, pay.payment_status, pay.payment_method, pay.transaction_id, pay.created_at,
+              pr.tracking_id, pr.recipient_name, u.full_name as customer_name
+       FROM payments pay
+       INNER JOIN parcels pr ON pay.parcel_id = pr.id
+       INNER JOIN users u ON pay.user_id = u.id
+       ORDER BY pay.created_at DESC
+       LIMIT 8`
     );
 
     res.json({
@@ -120,9 +160,12 @@ router.get('/dashboard', async (req, res) => {
         totalRevenue: parseFloat(revenue.rows[0].total),
         totalDrivers: parseInt(totalDrivers.rows[0].count),
         availableDrivers: parseInt(availableDrivers.rows[0].count),
-        unassignedCount: parseInt(unassignedCount.rows[0].count)
+        unassignedCount: parseInt(unassignedCount.rows[0].count),
+        completedPayments: parseInt(completedPayments.rows[0].count, 10),
+        pendingPayments: parseInt(pendingPayments.rows[0].count, 10),
       },
-      recentParcels: recentParcels.rows
+      recentParcels: recentParcels.rows,
+      recentPayments: recentPayments.rows,
     });
   } catch (error) {
     console.error('Dashboard error:', error);
@@ -247,6 +290,8 @@ router.post('/pricing-rules', [
   body('insuranceFee').isFloat({ min: 0 }),
   body('minPrice').isFloat({ min: 0 }),
   body('maxPrice').optional().isFloat({ min: 0 }),
+  body('intraStatePickupFee').optional().isFloat({ min: 0 }),
+  body('intraStateDeliveryFee').optional().isFloat({ min: 0 }),
   body('isActive').isBoolean()
 ], async (req, res) => {
   try {
@@ -265,6 +310,8 @@ router.post('/pricing-rules', [
       insuranceFee,
       minPrice,
       maxPrice,
+      intraStatePickupFee,
+      intraStateDeliveryFee,
       isActive
     } = req.body;
 
@@ -276,10 +323,15 @@ router.post('/pricing-rules', [
     const result = await pool.query(
       `INSERT INTO pricing_rules (
         rule_name, base_price, price_per_km, price_per_kg, weight_included_kg,
-        express_surcharge, insurance_fee, min_price, max_price, is_active
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        express_surcharge, insurance_fee, min_price, max_price, 
+        intra_state_pickup_fee, intra_state_delivery_fee, is_active
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING *`,
-      [ruleName, basePrice, pricePerKm, pricePerKg, weightIncludedKg, expressSurcharge, insuranceFee, minPrice, maxPrice, isActive]
+      [
+        ruleName, basePrice, pricePerKm, pricePerKg, weightIncludedKg, 
+        expressSurcharge, insuranceFee, minPrice, maxPrice,
+        intraStatePickupFee || 500, intraStateDeliveryFee || 500, isActive
+      ]
     );
 
     res.status(201).json({
@@ -317,6 +369,8 @@ router.put('/pricing-rules/:id', [
   body('insuranceFee').optional().isFloat({ min: 0 }),
   body('minPrice').optional().isFloat({ min: 0 }),
   body('maxPrice').optional().isFloat({ min: 0 }),
+  body('intraStatePickupFee').optional().isFloat({ min: 0 }),
+  body('intraStateDeliveryFee').optional().isFloat({ min: 0 }),
   body('isActive').optional().isBoolean()
 ], async (req, res) => {
   try {
@@ -391,6 +445,100 @@ router.delete('/pricing-rules/:id', async (req, res) => {
   }
 });
 
+// --- Interstate Pricing ---
+
+// Get all interstate rates
+router.get('/interstate-pricing', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM state_pricing ORDER BY origin_state, destination_state'
+    );
+    res.json({ rates: result.rows });
+  } catch (error) {
+    console.error('Get interstate rates error:', error);
+    res.status(500).json({ error: 'Failed to get interstate rates' });
+  }
+});
+
+// Create/Update interstate rate
+router.post('/interstate-pricing', [
+  body('originState').trim().notEmpty(),
+  body('destinationState').trim().notEmpty(),
+  body('price').isFloat({ min: 0 }),
+  body('isActive').optional().isBoolean()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    const { originState, destinationState, price, isActive = true } = req.body;
+
+    const result = await pool.query(
+      `INSERT INTO state_pricing (origin_state, destination_state, price, is_active)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (origin_state, destination_state) 
+       DO UPDATE SET price = EXCLUDED.price, is_active = EXCLUDED.is_active, updated_at = CURRENT_TIMESTAMP
+       RETURNING *`,
+      [originState, destinationState, price, isActive]
+    );
+
+    res.status(201).json({ message: 'Interstate rate saved', rate: result.rows[0] });
+  } catch (error) {
+    console.error('Save interstate rate error:', error);
+    res.status(500).json({ error: 'Failed to save interstate rate' });
+  }
+});
+
+// Update interstate rate
+router.put('/interstate-pricing/:id', [
+  body('price').optional().isFloat({ min: 0 }),
+  body('isActive').optional().isBoolean()
+], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { price, isActive } = req.body;
+
+    const updateFields = [];
+    const values = [];
+    let paramCount = 1;
+
+    if (price !== undefined) {
+      updateFields.push(`price = $${paramCount++}`);
+      values.push(price);
+    }
+    if (isActive !== undefined) {
+      updateFields.push(`is_active = $${paramCount++}`);
+      values.push(isActive);
+    }
+
+    if (updateFields.length === 0) return res.status(400).json({ error: 'No fields to update' });
+
+    values.push(id);
+    const result = await pool.query(
+      `UPDATE state_pricing SET ${updateFields.join(', ')}, updated_at = CURRENT_TIMESTAMP 
+       WHERE id = $${paramCount} RETURNING *`,
+      values
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Rate path not found' });
+    res.json({ message: 'Interstate rate updated', rate: result.rows[0] });
+  } catch (error) {
+    console.error('Update interstate rate error:', error);
+    res.status(500).json({ error: 'Failed to update interstate rate' });
+  }
+});
+
+// Delete interstate rate
+router.delete('/interstate-pricing/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query('DELETE FROM state_pricing WHERE id = $1 RETURNING id', [id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Rate path not found' });
+    res.json({ message: 'Interstate rate deleted' });
+  } catch (error) {
+    console.error('Delete interstate rate error:', error);
+    res.status(500).json({ error: 'Failed to delete interstate rate' });
+  }
+});
+
 module.exports = router;
-
-

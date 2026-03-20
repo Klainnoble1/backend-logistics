@@ -12,6 +12,22 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Normalize state names for robust matching (e.g., "Lagos State" -> "lagos") */
+function normalizeState(name) {
+  if (!name) return null;
+  let s = String(name).toLowerCase().trim();
+  
+  // Map common variants of Abuja/FCT first
+  if (s.includes('federal capital territory') || s === 'fct' || s === 'abuja') {
+    return 'abuja';
+  }
+
+  // Remove common suffixes
+  s = s.replace(/\s+(state|province|region|territory)$/gi, '');
+  
+  return s.trim();
+}
+
 /** Geocode one address via Mapbox (when token set) or Nominatim (fallback). Returns { lat, lon } or null. */
 async function geocodeAddress(address) {
   const mapboxToken = process.env.MAPBOX_ACCESS_TOKEN;
@@ -32,7 +48,7 @@ async function geocodeAddress(address) {
           const region = feature.context.find(ctx => ctx.id.startsWith('region.'));
           if (region) state = region.text;
         }
-
+        
         return { lat: parseFloat(lat), lon: parseFloat(lon), state };
       }
     } catch (err) {
@@ -137,14 +153,20 @@ async function calculatePrice(pickupAddress, deliveryAddress, weight, serviceTyp
     const breakdown = {};
 
     // Check if Interstate
-    const isInterstate = pickupState && deliveryState && pickupState !== deliveryState;
+    const isInterstate = pickupState && deliveryState && normalizeState(pickupState) !== normalizeState(deliveryState);
     let interstateBasePrice = null;
 
     if (isInterstate) {
-      // Find fixed interstate rate
+      const normPickup = normalizeState(pickupState);
+      const normDelivery = normalizeState(deliveryState);
+      
+      // Find fixed interstate rate - try exact match first, then normalized
       const interstateResult = await pool.query(
-        'SELECT price FROM state_pricing WHERE origin_state = $1 AND destination_state = $2 AND is_active = true',
-        [pickupState, deliveryState]
+        `SELECT price FROM state_pricing 
+         WHERE (origin_state = $1 OR LOWER(origin_state) = $2)
+           AND (destination_state = $3 OR LOWER(destination_state) = $4)
+           AND is_active = true`,
+        [pickupState, normPickup, deliveryState, normDelivery]
       );
       
       if (interstateResult.rows.length > 0) {

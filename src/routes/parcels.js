@@ -5,6 +5,7 @@ const { authenticate, authorize } = require('../middleware/auth');
 const generateTrackingId = require('../utils/generateTrackingId');
 const { calculatePrice, estimateDeliveryDate } = require('../services/pricingService');
 const { notifyStatusUpdate, notifyDriverReview } = require('../services/notificationService');
+const generateDeliveryCode = require('../utils/generateDeliveryCode');
 
 const router = express.Router();
 
@@ -39,7 +40,8 @@ router.get('/track/:trackingId', async (req, res) => {
         status: parcel.status,
         currentLocation: parcel.current_location,
         estimatedDeliveryDate: parcel.estimated_delivery_date,
-        recipientName: parcel.recipient_name
+        recipientName: parcel.recipient_name,
+        deliveryCode: parcel.delivery_code // Include delivery code for tracking
       },
       statusHistory: historyResult.rows
     });
@@ -116,7 +118,7 @@ router.post('/', [
     const pricing = await calculatePrice(pickupAddress, deliveryAddress, weight, serviceType, insurance);
     const estimatedDelivery = estimateDeliveryDate(serviceType, pricing.distance);
 
-    // Generate unique tracking ID
+    // Generate unique tracking ID and delivery code
     let trackingId;
     let isUnique = false;
     while (!isUnique) {
@@ -127,21 +129,25 @@ router.post('/', [
       }
     }
 
-    // Create parcel (store road distance for display)
+    const deliveryCode = generateDeliveryCode();
+
+    // Create parcel
     const result = await pool.query(
       `INSERT INTO parcels (
         tracking_id, sender_id, recipient_name, recipient_phone,
         pickup_address, delivery_address, parcel_type, weight,
         dimensions, service_type, status, price, insurance,
-        description, estimated_delivery_date, distance_km
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        description, estimated_delivery_date, distance_km, pickup_state, delivery_state,
+        delivery_code
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
       RETURNING *`,
       [
         trackingId, req.user.id, recipientName, recipientPhone,
         pickupAddress, deliveryAddress, parcelType, weight,
         JSON.stringify(dimensions || {}), serviceType, 'created',
         pricing.price, insurance, description, estimatedDelivery,
-        pricing.distance
+        pricing.distance, pricing.pickupState || null, pricing.deliveryState || null,
+        deliveryCode
       ]
     );
 
@@ -226,7 +232,6 @@ router.get('/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Check if user has access to this parcel
     let query;
     let params;
 
@@ -254,54 +259,6 @@ router.get('/:id', async (req, res) => {
 
     let parcel = result.rows[0];
 
-    // For admin, attach sender info
-    if (req.user.role === 'admin' && parcel.sender_id) {
-      const senderResult = await pool.query(
-        'SELECT full_name, email FROM users WHERE id = $1',
-        [parcel.sender_id]
-      );
-      if (senderResult.rows.length > 0) {
-        parcel = { ...parcel, sender_name: senderResult.rows[0].full_name, sender_email: senderResult.rows[0].email };
-      }
-    }
-
-    // For customer: attach assignment delivery review (delivery_confirmed_at, rating, review_comment, driver name)
-    if (req.user.role === 'customer') {
-      try {
-        const assignmentResult = await pool.query(
-          `SELECT a.delivery_confirmed_at, a.rating, a.review_comment, u.full_name AS driver_name
-           FROM assignments a
-           JOIN drivers d ON a.driver_id = d.id
-           JOIN users u ON d.user_id = u.id
-           WHERE a.parcel_id = $1`,
-          [id]
-        );
-        if (assignmentResult.rows.length > 0) {
-          const a = assignmentResult.rows[0];
-          parcel = {
-            ...parcel,
-            delivery_confirmed_at: a.delivery_confirmed_at,
-            rating: a.rating,
-            review_comment: a.review_comment,
-            assigned_driver_name: a.driver_name
-          };
-        }
-      } catch (assignErr) {
-        // Migration 005 may not be run yet (missing delivery_confirmed_at, rating, review_comment)
-        const fallbackResult = await pool.query(
-          `SELECT u.full_name AS driver_name
-           FROM assignments a
-           JOIN drivers d ON a.driver_id = d.id
-           JOIN users u ON d.user_id = u.id
-           WHERE a.parcel_id = $1`,
-          [id]
-        );
-        if (fallbackResult.rows.length > 0) {
-          parcel = { ...parcel, assigned_driver_name: fallbackResult.rows[0].driver_name };
-        }
-      }
-    }
-
     // Get status history
     const historyResult = await pool.query(
       `SELECT psh.*, u.full_name as updated_by_name
@@ -322,17 +279,12 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// Confirm delivery and rate rider (customer/sender only, parcel must be delivered)
+// Confirm delivery and rate rider (customer/sender only)
 router.post('/:id/confirm-delivery', [
   body('rating').isInt({ min: 1, max: 5 }),
   body('reviewComment').optional().trim()
 ], authorize('customer'), async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
-    }
-
     const { id } = req.params;
     const { rating, reviewComment } = req.body;
 
@@ -372,12 +324,7 @@ router.post('/:id/confirm-delivery', [
       console.error('Notify driver review failed:', err)
     );
 
-    res.json({
-      message: 'Delivery confirmed and review submitted',
-      deliveryConfirmedAt: new Date().toISOString(),
-      rating,
-      reviewComment: reviewComment || null
-    });
+    res.json({ message: 'Delivery confirmed and review submitted' });
   } catch (error) {
     console.error('Confirm delivery error:', error);
     res.status(500).json({ error: 'Failed to confirm delivery' });
@@ -386,9 +333,10 @@ router.post('/:id/confirm-delivery', [
 
 // Update parcel status (driver/admin only)
 router.put('/:id/status', [
-  body('status').isIn(['created', 'picked_up', 'in_transit', 'out_for_delivery', 'delivered', 'failed', 'returned']),
+  body('status').isIn(['created', 'paid', 'picked_up', 'in_transit', 'out_for_delivery', 'delivered', 'failed', 'returned']),
   body('location').optional().trim(),
-  body('notes').optional().trim()
+  body('notes').optional().trim(),
+  body('deliveryCode').optional().trim()
 ], authorize('driver', 'admin'), async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -397,9 +345,8 @@ router.put('/:id/status', [
     }
 
     const { id } = req.params;
-    const { status, location, notes } = req.body;
+    const { status, location, notes, deliveryCode } = req.body;
 
-    // Check if parcel exists and user has access
     let parcelQuery;
     let parcelParams;
 
@@ -424,16 +371,22 @@ router.put('/:id/status', [
 
     const parcel = parcelResult.rows[0];
 
-    // Update parcel status
+    // Verification code check for delivery
+    if (status === 'delivered') {
+      if (!deliveryCode) {
+        return res.status(400).json({ error: 'Delivery verification code is required to complete delivery' });
+      }
+      if (deliveryCode !== parcel.delivery_code) {
+        return res.status(400).json({ error: 'Invalid delivery verification code' });
+      }
+    }
+
     const updateData = {
       status,
       current_location: location || parcel.current_location,
+      actual_delivery_date: status === 'delivered' ? new Date().toISOString().split('T')[0] : parcel.actual_delivery_date,
       updated_at: new Date()
     };
-
-    if (status === 'delivered') {
-      updateData.actual_delivery_date = new Date().toISOString().split('T')[0];
-    }
 
     await pool.query(
       `UPDATE parcels 
@@ -449,7 +402,6 @@ router.put('/:id/status', [
       [id, status, location || parcel.current_location, req.user.id, notes || '']
     );
 
-    // When delivered, set assignment status to completed
     if (status === 'delivered') {
       await pool.query(
         `UPDATE assignments SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE parcel_id = $1`,
@@ -457,7 +409,6 @@ router.put('/:id/status', [
       );
     }
 
-    // Notify sender about status update (non-blocking)
     notifyStatusUpdate(id, status, parcel.sender_id).catch((err) =>
       console.error('Notify status update failed:', err)
     );
@@ -473,5 +424,3 @@ router.put('/:id/status', [
 });
 
 module.exports = router;
-
-

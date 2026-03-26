@@ -52,7 +52,7 @@ async function publishPaidParcelToDrivers(parcelId) {
   }
 
   const parcel = parcelResult.rows[0];
-  if (parcel.status !== 'created') {
+  if (parcel.status !== 'paid') {
     return;
   }
 
@@ -166,6 +166,21 @@ async function confirmPayment(paymentId, transactionId) {
     );
 
     const confirmedPayment = result.rows[0];
+
+    // Update parcel status to 'paid' and record history
+    try {
+      await pool.query(
+        "UPDATE parcels SET status = 'paid', updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+        [confirmedPayment.parcel_id]
+      );
+      await pool.query(
+        `INSERT INTO parcel_status_history (parcel_id, status, location, updated_by, notes)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [confirmedPayment.parcel_id, 'paid', 'Payment Service', confirmedPayment.user_id, 'Payment confirmed successfully']
+      );
+    } catch (dbError) {
+      console.error('Failed to update parcel status to paid:', dbError);
+    }
 
     publishPaidParcelToDrivers(confirmedPayment.parcel_id).catch((error) => {
       console.error('Publish paid parcel to drivers error:', error);

@@ -49,7 +49,7 @@ router.get('/available', authorize('admin'), async (req, res) => {
 router.get('/me', authorize('driver'), async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT d.id, d.status, d.license_number, d.vehicle_type, d.vehicle_plate, u.full_name, u.email, u.phone
+      `SELECT d.id, d.status, d.state, d.license_number, d.vehicle_type, d.vehicle_plate, u.full_name, u.email, u.phone
        FROM drivers d
        INNER JOIN users u ON d.user_id = u.id
        WHERE d.user_id = $1`,
@@ -63,6 +63,7 @@ router.get('/me', authorize('driver'), async (req, res) => {
       driver: {
         id: row.id,
         status: row.status,
+        state: row.state,
         licenseNumber: row.license_number,
         vehicleType: row.vehicle_type,
         vehiclePlate: row.vehicle_plate,
@@ -174,6 +175,25 @@ router.get('/me/assignments', authorize('driver'), async (req, res) => {
 // Get available parcels (not yet assigned) – drivers can pick from these
 router.get('/me/available-parcels', authorize('driver'), async (req, res) => {
   try {
+    // Get driver operating state
+    const driverResult = await pool.query(
+      'SELECT state FROM drivers WHERE user_id = $1',
+      [req.user.id]
+    );
+
+    if (driverResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Driver profile not found' });
+    }
+
+    const driverState = driverResult.rows[0].state;
+
+    if (!driverState) {
+      return res.json({ 
+        parcels: [], 
+        message: 'Please set your operating state in your profile to see available parcels.' 
+      });
+    }
+
     const result = await pool.query(
       `SELECT p.id, p.tracking_id, p.recipient_name, p.recipient_phone,
               p.pickup_address, p.delivery_address, p.parcel_type, p.weight,
@@ -181,7 +201,8 @@ router.get('/me/available-parcels', authorize('driver'), async (req, res) => {
               p.created_at, u.full_name as sender_name
        FROM parcels p
        INNER JOIN users u ON p.sender_id = u.id
-       WHERE p.status = 'created'
+       WHERE p.status = 'paid'
+         AND p.pickup_state = $1
          AND EXISTS (
            SELECT 1
            FROM payments pay
@@ -189,7 +210,8 @@ router.get('/me/available-parcels', authorize('driver'), async (req, res) => {
              AND pay.payment_status = 'completed'
          )
          AND NOT EXISTS (SELECT 1 FROM assignments a WHERE a.parcel_id = p.id)
-       ORDER BY p.created_at DESC`
+       ORDER BY p.created_at DESC`,
+      [driverState]
     );
 
     const parcels = result.rows.map((row) => ({
@@ -203,6 +225,7 @@ router.get('/me/available-parcels', authorize('driver'), async (req, res) => {
       weight: parseFloat(row.weight),
       serviceType: row.service_type,
       status: row.status,
+        state: row.state,
       price: parseFloat(row.price),
       estimatedDeliveryDate: row.estimated_delivery_date,
       createdAt: row.created_at,
@@ -248,8 +271,8 @@ router.post('/me/claim', [
       return res.status(404).json({ error: 'Parcel not found' });
     }
 
-    if (parcelResult.rows[0].status !== 'created') {
-      return res.status(400).json({ error: 'Parcel is not available for delivery' });
+    if (parcelResult.rows[0].status !== 'paid') {
+      return res.status(400).json({ error: 'Parcel is not available for delivery (must be paid first)' });
     }
 
     const hasCompletedPayment = await hasCompletedPaymentForParcel(parcelId);
@@ -407,8 +430,8 @@ router.post('/:driverId/assign', [
       return res.status(404).json({ error: 'Parcel not found' });
     }
 
-    if (parcelResult.rows[0].status !== 'created') {
-      return res.status(400).json({ error: 'Parcel is not available for assignment' });
+    if (parcelResult.rows[0].status !== 'paid') {
+      return res.status(400).json({ error: 'Parcel is not available for assignment (must be paid first)' });
     }
 
     const hasCompletedPayment = await hasCompletedPaymentForParcel(parcelId);
@@ -470,7 +493,8 @@ router.post('/:driverId/assign', [
 router.put('/me/profile', [
   body('licenseNumber').optional().trim(),
   body('vehicleType').optional().trim(),
-  body('vehiclePlate').optional().trim()
+  body('vehiclePlate').optional().trim(),
+  body('state').optional().trim()
 ], authorize('driver'), async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -478,7 +502,7 @@ router.put('/me/profile', [
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { licenseNumber, vehicleType, vehiclePlate } = req.body;
+    const { licenseNumber, vehicleType, vehiclePlate, state } = req.body;
 
     const updates = [];
     const values = [];
@@ -493,8 +517,12 @@ router.put('/me/profile', [
       values.push(vehicleType);
     }
     if (vehiclePlate !== undefined) {
-      updates.push(`vehicle_plate = $${paramCount++}`);
+      updates.push(`vehicle_plate = ${paramCount++}`);
       values.push(vehiclePlate);
+    }
+    if (state !== undefined) {
+      updates.push(`state = ${paramCount++}`);
+      values.push(state);
     }
 
     if (updates.length === 0) {

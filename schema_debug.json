@@ -1,0 +1,39 @@
+{
+  "parcels": [
+    "id",
+    "tracking_id",
+    "sender_id",
+    "recipient_name",
+    "recipient_phone",
+    "pickup_address",
+    "delivery_address",
+    "parcel_type",
+    "weight",
+    "dimensions",
+    "service_type",
+    "status",
+    "current_location",
+    "estimated_delivery_date",
+    "actual_delivery_date",
+    "price",
+    "insurance",
+    "description",
+    "created_at",
+    "updated_at",
+    "distance_km",
+    "pickup_state",
+    "delivery_state"
+  ],
+  "drivers": [
+    "id",
+    "user_id",
+    "license_number",
+    "vehicle_type",
+    "vehicle_plate",
+    "status",
+    "current_location",
+    "created_at",
+    "updated_at",
+    "state"
+  ]
+}

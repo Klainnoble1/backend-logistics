@@ -224,6 +224,8 @@ async function calculatePrice(pickupAddress, deliveryAddress, weight, serviceTyp
     return {
       price: Math.round(price * 100) / 100,
       distance,
+      pickupState,
+      deliveryState,
       breakdown
     };
   } catch (error) {

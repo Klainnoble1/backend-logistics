@@ -102,7 +102,7 @@ async function initializePayment(parcelId, userId, amount, email, callbackUrl, m
       `${PAYSTACK_BASE}/transaction/initialize`,
       {
         email: email || 'customer@example.com',
-        amount: String(amountKobo),
+        amount: amountKobo,
         currency: 'NGN',
         reference,
         callback_url: callbackUrl || undefined,
@@ -234,8 +234,19 @@ async function verifyPaystackReference(reference) {
       return {};
     }
 
+    // Robustly parse metadata
+    let metadata = data.metadata || {};
+    if (typeof metadata === 'string') {
+      try {
+        metadata = JSON.parse(metadata);
+      } catch (e) {
+        console.error('Failed to parse Paystack metadata string:', e);
+        metadata = {};
+      }
+    }
+
     return {
-      paymentId: data.metadata?.payment_id || null,
+      paymentId: metadata.payment_id || null,
       reference: data.reference || reference,
       status: data.status || null,
       amount: data.amount != null ? Number(data.amount) / 100 : null,
@@ -243,7 +254,7 @@ async function verifyPaystackReference(reference) {
       channel: data.channel || null,
       gatewayResponse: data.gateway_response || null,
       customerEmail: data.customer?.email || null,
-      metadata: data.metadata || {},
+      metadata: metadata,
     };
   } catch (error) {
     console.error('Verify Paystack reference error:', error.response?.data || error.message || error);
@@ -271,7 +282,16 @@ async function handlePaystackWebhook(event) {
     }
 
     if (event.event === 'charge.success') {
-      const paymentId = event.data.metadata?.payment_id;
+      let metadata = event.data.metadata || {};
+      if (typeof metadata === 'string') {
+        try {
+          metadata = JSON.parse(metadata);
+        } catch (e) {
+          metadata = {};
+        }
+      }
+
+      const paymentId = metadata.payment_id;
       const reference = event.data.reference;
       if (paymentId) {
         await confirmPayment(paymentId, reference || null);
@@ -279,7 +299,16 @@ async function handlePaystackWebhook(event) {
     }
 
     if (event.event === 'charge.failed') {
-      const paymentId = event.data.metadata?.payment_id;
+      let metadata = event.data.metadata || {};
+      if (typeof metadata === 'string') {
+        try {
+          metadata = JSON.parse(metadata);
+        } catch (e) {
+          metadata = {};
+        }
+      }
+
+      const paymentId = metadata.payment_id;
       const reference = event.data.reference;
       if (paymentId) {
         await markPaymentFailed(paymentId, reference || null);

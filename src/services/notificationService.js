@@ -157,14 +157,31 @@ async function notifyDriverReview(driverId, parcelId, rating, reviewComment) {
 // Notify all drivers who have push tokens that a new parcel is available to claim
 async function notifyDriversNewParcelAvailable(parcelId, trackingId) {
   try {
-    const result = await pool.query(
-      `SELECT DISTINCT d.user_id
-       FROM drivers d
-       INNER JOIN user_push_tokens t ON t.user_id = d.user_id
-       WHERE d.status = 'available'`
+    const parcelResult = await pool.query(
+      'SELECT pickup_state FROM parcels WHERE id = $1',
+      [parcelId]
     );
+    if (parcelResult.rows.length === 0) return;
+    const state = parcelResult.rows[0].pickup_state;
+
+    let query = `
+      SELECT DISTINCT d.user_id
+      FROM drivers d
+      INNER JOIN user_push_tokens t ON t.user_id = d.user_id
+      WHERE d.status = 'available'
+    `;
+    let params = [];
+
+    if (state) {
+      query += ' AND LOWER(d.state) = LOWER($1)';
+      params = [state];
+    }
+
+    const result = await pool.query(query, params);
+    
     const title = 'New order available';
-    const message = `New parcel ${trackingId} is available to claim`;
+    const message = `New parcel ${trackingId} is available in your area`;
+    
     for (const row of result.rows) {
       await createNotification(row.user_id, parcelId, 'new_parcel_available', title, message);
       await sendPushToUser(row.user_id, title, message, {

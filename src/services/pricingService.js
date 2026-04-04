@@ -257,7 +257,8 @@ function estimateDeliveryDate(serviceType, distance, durationMinutes = null) {
 module.exports = {
   calculatePrice,
   calculateDistance,
-  estimateDeliveryDate
+  estimateDeliveryDate,
+  normalizeState
 };
 
 

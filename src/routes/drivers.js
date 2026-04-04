@@ -4,6 +4,7 @@ const pool = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const { notifyDriverAssignment } = require('../services/notificationService');
 const { hasCompletedPaymentForParcel } = require('../services/paymentService');
+const { normalizeState } = require('../services/pricingService');
 
 const router = express.Router();
 
@@ -49,7 +50,7 @@ router.get('/available', authorize('admin'), async (req, res) => {
 router.get('/me', authorize('driver'), async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT d.id, d.status, d.state, d.license_number, d.vehicle_type, d.vehicle_plate, u.full_name, u.email, u.phone
+      `SELECT d.id, d.status, d.state, d.license_number, d.vehicle_type, d.vehicle_plate, d.wallet_balance, d.completed_orders, d.average_rating, u.full_name, u.email, u.phone
        FROM drivers d
        INNER JOIN users u ON d.user_id = u.id
        WHERE d.user_id = $1`,
@@ -67,6 +68,9 @@ router.get('/me', authorize('driver'), async (req, res) => {
         licenseNumber: row.license_number,
         vehicleType: row.vehicle_type,
         vehiclePlate: row.vehicle_plate,
+        walletBalance: parseFloat(row.wallet_balance || 0),
+        completedOrders: row.completed_orders || 0,
+        averageRating: parseFloat(row.average_rating || 5.0),
         fullName: row.full_name,
         email: row.email,
         phone: row.phone,
@@ -172,6 +176,86 @@ router.get('/me/assignments', authorize('driver'), async (req, res) => {
   }
 });
 
+// Accept assignment
+router.post('/me/assignments/:id/accept', authorize('driver'), async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await pool.query(
+      `UPDATE assignments 
+       SET status = 'accepted', updated_at = CURRENT_TIMESTAMP 
+       WHERE id = $1 AND driver_id = (SELECT id FROM drivers WHERE user_id = $2)
+       RETURNING *`,
+      [id, req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Assignment not found or not assigned to you' });
+    }
+
+    res.json({ message: 'Assignment accepted', assignment: result.rows[0] });
+  } catch (error) {
+    console.error('Accept assignment error:', error);
+    res.status(500).json({ error: 'Failed to accept assignment' });
+  }
+});
+
+// Decline assignment
+router.post('/me/assignments/:id/decline', authorize('driver'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const { id } = req.params;
+
+    // Get assignment and parcel details first
+    const assignmentResult = await client.query(
+      `SELECT a.*, p.status as parcel_status 
+       FROM assignments a 
+       JOIN parcels p ON a.parcel_id = p.id 
+       WHERE a.id = $1 AND a.driver_id = (SELECT id FROM drivers WHERE user_id = $2)`,
+      [id, req.user.id]
+    );
+
+    if (assignmentResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Assignment not found' });
+    }
+
+    const assignment = assignmentResult.rows[0];
+
+    // Delete assignment
+    await client.query('DELETE FROM assignments WHERE id = $1', [id]);
+
+    // Reset parcel status back to 'paid' so it's available for other drivers
+    await client.query(
+      `UPDATE parcels SET status = 'paid' WHERE id = $1`,
+      [assignment.parcel_id]
+    );
+
+    // Reset driver status to 'available'
+    await client.query(
+      `UPDATE drivers SET status = 'available' WHERE id = $1`,
+      [assignment.driver_id]
+    );
+
+    // Add to history
+    await client.query(
+      `INSERT INTO parcel_status_history (parcel_id, status, updated_by, notes)
+       VALUES ($1, $2, $3, $4)`,
+      [assignment.parcel_id, 'paid', req.user.id, 'Driver declined assignment, reset to paid']
+    );
+
+    await client.query('COMMIT');
+    res.json({ message: 'Assignment declined and parcel released' });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Decline assignment error:', error);
+    res.status(500).json({ error: 'Failed to decline assignment' });
+  } finally {
+    client.release();
+  }
+});
+
 // Get available parcels (not yet assigned) – drivers can pick from these
 router.get('/me/available-parcels', authorize('driver'), async (req, res) => {
   try {
@@ -185,7 +269,8 @@ router.get('/me/available-parcels', authorize('driver'), async (req, res) => {
       return res.status(404).json({ error: 'Driver profile not found' });
     }
 
-    const driverState = driverResult.rows[0].state;
+    const driverStateRaw = driverResult.rows[0].state;
+    const driverState = normalizeState(driverStateRaw);
 
     if (!driverState) {
       return res.json({ 
@@ -201,13 +286,16 @@ router.get('/me/available-parcels', authorize('driver'), async (req, res) => {
               p.created_at, u.full_name as sender_name
        FROM parcels p
        INNER JOIN users u ON p.sender_id = u.id
-       WHERE p.status = 'paid'
-         AND p.pickup_state = $1
-         AND EXISTS (
-           SELECT 1
-           FROM payments pay
-           WHERE pay.parcel_id = p.id
-             AND pay.payment_status = 'completed'
+       WHERE LOWER(p.pickup_state) = $1
+         AND (
+           (p.status = 'paid')
+           OR (
+             p.status = 'created'
+             AND EXISTS (
+               SELECT 1 FROM payments pay
+               WHERE pay.parcel_id = p.id AND pay.payment_status = 'completed'
+             )
+           )
          )
          AND NOT EXISTS (SELECT 1 FROM assignments a WHERE a.parcel_id = p.id)
        ORDER BY p.created_at DESC`,
@@ -225,7 +313,6 @@ router.get('/me/available-parcels', authorize('driver'), async (req, res) => {
       weight: parseFloat(row.weight),
       serviceType: row.service_type,
       status: row.status,
-        state: row.state,
       price: parseFloat(row.price),
       estimatedDeliveryDate: row.estimated_delivery_date,
       createdAt: row.created_at,
@@ -271,13 +358,11 @@ router.post('/me/claim', [
       return res.status(404).json({ error: 'Parcel not found' });
     }
 
-    if (parcelResult.rows[0].status !== 'paid') {
-      return res.status(400).json({ error: 'Parcel is not available for delivery (must be paid first)' });
-    }
-
+    const parcel = parcelResult.rows[0];
     const hasCompletedPayment = await hasCompletedPaymentForParcel(parcelId);
-    if (!hasCompletedPayment) {
-      return res.status(400).json({ error: 'Parcel is awaiting payment confirmation' });
+
+    if (parcel.status !== 'paid' && !(parcel.status === 'created' && hasCompletedPayment)) {
+      return res.status(400).json({ error: 'Parcel is not available for delivery (must be paid first)' });
     }
 
     const assignmentCheck = await pool.query(
@@ -517,12 +602,12 @@ router.put('/me/profile', [
       values.push(vehicleType);
     }
     if (vehiclePlate !== undefined) {
-      updates.push(`vehicle_plate = ${paramCount++}`);
+      updates.push(`vehicle_plate = $${paramCount++}`);
       values.push(vehiclePlate);
     }
     if (state !== undefined) {
-      updates.push(`state = ${paramCount++}`);
-      values.push(state);
+      updates.push(`state = $${paramCount++}`);
+      values.push(normalizeState(state));
     }
 
     if (updates.length === 0) {
@@ -531,13 +616,14 @@ router.put('/me/profile', [
 
     values.push(req.user.id);
 
-    const result = await pool.query(
-      `UPDATE drivers 
+    const queryStr = `UPDATE drivers 
        SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP
        WHERE user_id = $${paramCount}
-       RETURNING *`,
-      values
-    );
+       RETURNING *`;
+    console.log('EXECUTING QUERY:', queryStr);
+    console.log('WITH VALUES:', values);
+
+    const result = await pool.query(queryStr, values);
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Driver profile not found' });
@@ -549,7 +635,7 @@ router.put('/me/profile', [
     });
   } catch (error) {
     console.error('Update driver profile error:', error);
-    res.status(500).json({ error: 'Failed to update driver profile' });
+    res.status(500).json({ error: 'Failed to update driver profile: ' + error.message });
   }
 });
 

@@ -3,7 +3,7 @@ const { body, validationResult } = require('express-validator');
 const pool = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 const generateTrackingId = require('../utils/generateTrackingId');
-const { calculatePrice, estimateDeliveryDate } = require('../services/pricingService');
+const { calculatePrice, estimateDeliveryDate, normalizeState } = require('../services/pricingService');
 const { notifyStatusUpdate, notifyDriverReview } = require('../services/notificationService');
 const generateDeliveryCode = require('../utils/generateDeliveryCode');
 
@@ -130,6 +130,8 @@ router.post('/', [
     }
 
     const deliveryCode = generateDeliveryCode();
+    const normalizedPickupState = normalizeState(pricing.pickupState);
+    const normalizedDeliveryState = normalizeState(pricing.deliveryState);
 
     // Create parcel
     const result = await pool.query(
@@ -146,7 +148,7 @@ router.post('/', [
         pickupAddress, deliveryAddress, parcelType, weight,
         JSON.stringify(dimensions || {}), serviceType, 'created',
         pricing.price, insurance, description, estimatedDelivery,
-        pricing.distance, pricing.pickupState || null, pricing.deliveryState || null,
+        pricing.distance, normalizedPickupState || null, normalizedDeliveryState || null,
         deliveryCode
       ]
     );
@@ -318,6 +320,20 @@ router.post('/:id/confirm-delivery', [
        SET delivery_confirmed_at = CURRENT_TIMESTAMP, rating = $1, review_comment = $2, updated_at = CURRENT_TIMESTAMP
        WHERE parcel_id = $3`,
       [rating, reviewComment || null, id]
+    );
+
+    await pool.query(
+      `UPDATE drivers 
+       SET 
+         completed_orders = completed_orders + 1,
+         wallet_balance = wallet_balance + ($1::decimal * 0.8),
+         average_rating = (
+           SELECT COALESCE(AVG(rating), 5.0) 
+           FROM assignments 
+           WHERE driver_id = $2 AND rating IS NOT NULL
+         )
+       WHERE id = $2`,
+      [parcel.price, assignment.driver_id]
     );
 
     notifyDriverReview(assignment.driver_id, id, rating, reviewComment || null).catch((err) =>

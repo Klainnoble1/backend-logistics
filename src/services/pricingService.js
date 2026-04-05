@@ -114,8 +114,10 @@ async function calculateDistance(pickupAddress, deliveryAddress) {
     const delivery = await geocodeAddress(deliveryAddress);
 
     if (!pickup || !delivery) {
-      console.warn('Geocoding failed for one or both addresses, using default distance');
-      return { distanceKm: 10, durationMinutes: null, pickupState: null, deliveryState: null };
+      const failed = !pickup ? 'pickup' : (!delivery ? 'delivery' : 'both');
+      console.warn(`Geocoding failed for ${failed} address. Check MAPBOX_ACCESS_TOKEN or addresses.`);
+      // Default to 5km if geocoding fails to be slightly more realistic for intra-city
+      return { distanceKm: 5, durationMinutes: null, pickupState: null, deliveryState: null };
     }
 
     const road = await getRoadDistanceAndDuration(pickup, delivery);

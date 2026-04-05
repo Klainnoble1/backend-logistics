@@ -131,7 +131,12 @@ async function calculateDistance(pickupAddress, deliveryAddress) {
       deliveryState: delivery.state
     };
   } catch (error) {
-    console.error('Distance calculation error:', error.message);
+    console.error('CRITICAL Distance calculation error:', {
+      message: error.message,
+      pickupAddress,
+      deliveryAddress,
+      stack: error.stack
+    });
     return { distanceKm: 10, durationMinutes: null, pickupState: null, deliveryState: null };
   }
 }
@@ -231,7 +236,14 @@ async function calculatePrice(pickupAddress, deliveryAddress, weight, serviceTyp
       breakdown
     };
   } catch (error) {
-    console.error('Price calculation error:', error);
+    console.error('CRITICAL Price calculation error:', {
+      message: error.message,
+      pickupAddress,
+      deliveryAddress,
+      weight,
+      serviceType,
+      stack: error.stack
+    });
     throw error;
   }
 }

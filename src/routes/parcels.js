@@ -238,18 +238,29 @@ router.get('/:id', async (req, res) => {
     let params;
 
     if (req.user.role === 'customer') {
-      query = 'SELECT * FROM parcels WHERE id = $1 AND sender_id = $2';
+      query = `
+        SELECT p.*, a.rating, a.review_comment, a.delivery_confirmed_at 
+        FROM parcels p
+        LEFT JOIN assignments a ON p.id = a.parcel_id
+        WHERE p.id = $1 AND p.sender_id = $2
+      `;
       params = [id, req.user.id];
     } else if (req.user.role === 'driver') {
       query = `
-        SELECT p.* FROM parcels p
+        SELECT p.*, a.rating, a.review_comment, a.delivery_confirmed_at 
+        FROM parcels p
         INNER JOIN assignments a ON p.id = a.parcel_id
         INNER JOIN drivers d ON a.driver_id = d.id
         WHERE p.id = $1 AND d.user_id = $2
       `;
       params = [id, req.user.id];
     } else {
-      query = 'SELECT * FROM parcels WHERE id = $1';
+      query = `
+        SELECT p.*, a.rating, a.review_comment, a.delivery_confirmed_at 
+        FROM parcels p
+        LEFT JOIN assignments a ON p.id = a.parcel_id
+        WHERE p.id = $1
+      `;
       params = [id];
     }
 
@@ -305,15 +316,16 @@ router.post('/:id/confirm-delivery', [
     }
 
     const assignmentResult = await pool.query(
-      'SELECT id, driver_id FROM assignments WHERE parcel_id = $1',
+      'SELECT id, driver_id, delivery_confirmed_at FROM assignments WHERE parcel_id = $1',
       [id]
     );
-
     if (assignmentResult.rows.length === 0) {
       return res.status(400).json({ error: 'No assignment found for this parcel' });
     }
-
     const assignment = assignmentResult.rows[0];
+    if (assignment.delivery_confirmed_at) {
+      return res.status(400).json({ error: 'Delivery has already been confirmed and reviewed.' });
+    }
 
     await pool.query(
       `UPDATE assignments

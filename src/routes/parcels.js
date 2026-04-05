@@ -439,4 +439,51 @@ router.put('/:id/status', [
   }
 });
 
+// Delete parcel (customer only if status is 'created', or admin)
+router.delete('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const parcelResult = await pool.query('SELECT * FROM parcels WHERE id = $1', [id]);
+
+    if (parcelResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Parcel not found' });
+    }
+
+    const parcel = parcelResult.rows[0];
+
+    // Check permissions
+    const isOwner = parcel.sender_id === req.user.id;
+    const isAdmin = req.user.role === 'admin';
+
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Only allow deletion if status is 'created'
+    if (parcel.status !== 'created' && !isAdmin) {
+      return res.status(400).json({ error: 'Only unpaid parcels in created status can be deleted' });
+    }
+
+    // Use a transaction to delete parcel and its history
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM parcel_status_history WHERE parcel_id = $1', [id]);
+      await client.query('DELETE FROM assignments WHERE parcel_id = $1', [id]);
+      await client.query('DELETE FROM parcels WHERE id = $1', [id]);
+      await client.query('COMMIT');
+      res.json({ message: 'Parcel deleted successfully' });
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Delete parcel error:', error);
+    res.status(500).json({ error: 'Failed to delete parcel' });
+  }
+});
+
 module.exports = router;

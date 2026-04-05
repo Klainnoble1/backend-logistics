@@ -121,6 +121,28 @@ router.post('/users', [
   }
 });
 
+// Get users with optional role filtering (admin only)
+router.get('/users', async (req, res) => {
+  try {
+    const { role } = req.query;
+    let query = 'SELECT id, email, full_name, role, is_active, last_seen, created_at FROM users';
+    const params = [];
+
+    if (role) {
+      query += ' WHERE role = $1';
+      params.push(role);
+    }
+
+    query += ' ORDER BY created_at DESC';
+    const result = await pool.query(query, params);
+
+    res.json({ users: result.rows });
+  } catch (error) {
+    console.error('Get users error:', error);
+    res.status(500).json({ error: 'Failed to get users' });
+  }
+});
+
 // Get Audit Logs (Super Admin only)
 router.get('/audit-logs', async (req, res) => {
   try {

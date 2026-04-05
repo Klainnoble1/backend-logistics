@@ -23,6 +23,18 @@ const logAudit = async (adminId, action, targetType, targetId, details, ip) => {
   }
 };
 
+// Diagnostics - pricing check
+router.get('/diag-pricing', async (req, res) => {
+  if (req.user.email !== 'admin@oprime.com') return res.status(403).json({ error: 'Denied' });
+  try {
+    const { calculatePrice } = require('../services/pricingService');
+    const result = await calculatePrice('Lagos', 'Ibadan', 1, 'standard', false);
+    res.json({ status: 'ok', testResult: result });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: err.message, stack: err.stack });
+  }
+});
+
 // Track admin activity middleware
 router.use(async (req, res, next) => {
   if (req.user && req.user.role === 'admin') {

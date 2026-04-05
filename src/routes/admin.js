@@ -23,6 +23,16 @@ const logAudit = async (adminId, action, targetType, targetId, details, ip) => {
   }
 };
 
+// Diagnostics - env check (temporary)
+router.get('/diag-env', async (req, res) => {
+  if (req.user.email !== 'admin@oprime.com') return res.status(403).json({ error: 'Denied' });
+  res.json({
+    hasMapbox: !!process.env.MAPBOX_ACCESS_TOKEN,
+    nodeEnv: process.env.NODE_ENV,
+    dbUrlSet: !!process.env.DATABASE_URL
+  });
+});
+
 // Track admin activity middleware
 router.use(async (req, res, next) => {
   if (req.user && req.user.role === 'admin') {

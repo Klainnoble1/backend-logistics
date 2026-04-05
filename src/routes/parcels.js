@@ -325,15 +325,13 @@ router.post('/:id/confirm-delivery', [
     await pool.query(
       `UPDATE drivers 
        SET 
-         completed_orders = completed_orders + 1,
-         wallet_balance = wallet_balance + ($1::decimal * 0.8),
          average_rating = (
            SELECT COALESCE(AVG(rating), 5.0) 
            FROM assignments 
-           WHERE driver_id = $2 AND rating IS NOT NULL
+           WHERE driver_id = $1 AND rating IS NOT NULL
          )
-       WHERE id = $2`,
-      [parcel.price, assignment.driver_id]
+       WHERE id = $1`,
+      [assignment.driver_id]
     );
 
     notifyDriverReview(assignment.driver_id, id, rating, reviewComment || null).catch((err) =>
@@ -418,10 +416,29 @@ router.put('/:id/status', [
       [id, status, location || parcel.current_location, req.user.id, notes || '']
     );
 
+    // Audit log if admin
+    if (req.user.role === 'admin') {
+      await pool.query(
+        `INSERT INTO audit_logs (admin_id, action, target_type, target_id, details, ip_address)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [req.user.id, 'UPDATE_PARCEL_STATUS', 'parcel', id, { from: parcel.status, to: status, notes }, req.ip]
+      );
+    }
+
     if (status === 'delivered') {
       await pool.query(
         `UPDATE assignments SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE parcel_id = $1`,
         [id]
+      );
+
+      // Credit rider wallet immediately upon delivery (80% split)
+      await pool.query(
+        `UPDATE drivers 
+         SET 
+           completed_orders = completed_orders + 1,
+           wallet_balance = wallet_balance + ($1::decimal * 0.8)
+         WHERE id = (SELECT driver_id FROM assignments WHERE parcel_id = $2 LIMIT 1)`,
+        [parcel.price, id]
       );
     }
 
@@ -472,6 +489,16 @@ router.delete('/:id', async (req, res) => {
       await client.query('DELETE FROM parcel_status_history WHERE parcel_id = $1', [id]);
       await client.query('DELETE FROM assignments WHERE parcel_id = $1', [id]);
       await client.query('DELETE FROM parcels WHERE id = $1', [id]);
+
+      // Audit log if admin
+      if (req.user.role === 'admin') {
+        await client.query(
+          `INSERT INTO audit_logs (admin_id, action, target_type, target_id, details, ip_address)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [req.user.id, 'DELETE_PARCEL', 'parcel', id, { trackingId: parcel.tracking_id }, req.ip]
+        );
+      }
+
       await client.query('COMMIT');
       res.json({ message: 'Parcel deleted successfully' });
     } catch (e) {

@@ -10,6 +10,60 @@ const router = express.Router();
 router.use(authenticate);
 router.use(authorize('admin'));
 
+// Helper for audit logging
+const logAudit = async (adminId, action, targetType, targetId, details, ip) => {
+  try {
+    await pool.query(
+      `INSERT INTO audit_logs (admin_id, action, target_type, target_id, details, ip_address)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [adminId, action, targetType, targetId, JSON.stringify(details), ip]
+    );
+  } catch (e) {
+    console.error('Audit log error:', e);
+  }
+};
+
+// Track admin activity middleware
+router.use(async (req, res, next) => {
+  if (req.user && req.user.role === 'admin') {
+    try {
+      // Update last_seen
+      await pool.query('UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE id = $1', [req.user.id]);
+      
+      // Update or Create active session in admin_activity
+      const recentSession = await pool.query(
+        `SELECT id, login_at FROM admin_activity 
+         WHERE admin_id = $1 AND last_active_at > CURRENT_TIMESTAMP - INTERVAL '30 minutes'
+         ORDER BY last_active_at DESC LIMIT 1`,
+        [req.user.id]
+      );
+
+      if (recentSession.rows.length > 0) {
+        const sessionId = recentSession.rows[0].id;
+        const loginAt = recentSession.rows[0].login_at;
+        const now = new Date();
+        const duration = Math.floor((now.getTime() - new Date(loginAt).getTime()) / 1000);
+        
+        await pool.query(
+          `UPDATE admin_activity SET 
+             last_active_at = CURRENT_TIMESTAMP,
+             duration_seconds = $1
+           WHERE id = $2`,
+          [duration, sessionId]
+        );
+      } else {
+        await pool.query(
+          `INSERT INTO admin_activity (admin_id, ip_address) VALUES ($1, $2)`,
+          [req.user.id, req.ip]
+        );
+      }
+    } catch (e) {
+      console.error('Session tracking error:', e);
+    }
+  }
+  next();
+});
+
 // Create admin (or other) user – admin only
 router.post('/users', [
   body('email').isEmail().normalizeEmail(),
@@ -45,6 +99,9 @@ router.post('/users', [
 
     const user = result.rows[0];
 
+    // Audit log
+    await logAudit(req.user.id, 'CREATE_USER', 'user', user.id, { email, role, fullName }, req.ip);
+
     if (role === 'driver') {
       await pool.query('INSERT INTO drivers (user_id) VALUES ($1)', [user.id]);
     }
@@ -61,6 +118,59 @@ router.post('/users', [
   } catch (error) {
     console.error('Create user error:', error);
     res.status(500).json({ error: 'Failed to create user' });
+  }
+});
+
+// Get Audit Logs (Super Admin only)
+router.get('/audit-logs', async (req, res) => {
+  try {
+    if (req.user.email !== 'admin@oprime.com') {
+      return res.status(403).json({ error: 'Access denied. Super Admin only.' });
+    }
+
+    const { limit = 50, page = 1 } = req.query;
+    const offset = (page - 1) * limit;
+
+    const result = await pool.query(
+      `SELECT al.*, u.full_name as admin_name, u.email as admin_email
+       FROM audit_logs al
+       INNER JOIN users u ON al.admin_id = u.id
+       ORDER BY al.created_at DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    const totalRes = await pool.query('SELECT COUNT(*) as count FROM audit_logs');
+
+    res.json({
+      logs: result.rows,
+      total: parseInt(totalRes.rows[0].count)
+    });
+  } catch (error) {
+    console.error('Get audit logs error:', error);
+    res.status(500).json({ error: 'Failed to get audit logs' });
+  }
+});
+
+// Get Admin Activity (Super Admin only)
+router.get('/activity', async (req, res) => {
+  try {
+    if (req.user.email !== 'admin@oprime.com') {
+      return res.status(403).json({ error: 'Access denied. Super Admin only.' });
+    }
+
+    const result = await pool.query(
+      `SELECT aa.*, u.full_name as admin_name, u.email as admin_email, u.last_seen
+       FROM admin_activity aa
+       INNER JOIN users u ON aa.admin_id = u.id
+       ORDER BY aa.last_active_at DESC
+       LIMIT 100`
+    );
+
+    res.json({ activity: result.rows });
+  } catch (error) {
+    console.error('Get admin activity error:', error);
+    res.status(500).json({ error: 'Failed to get admin activity' });
   }
 });
 

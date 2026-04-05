@@ -376,7 +376,7 @@ router.post('/me/claim', [
 
     const assignmentResult = await pool.query(
       `INSERT INTO assignments (parcel_id, driver_id, assigned_by, status)
-       VALUES ($1, $2, $3, 'pending')
+       VALUES ($1, $2, $3, 'accepted')
        RETURNING *`,
       [parcelId, driverId, req.user.id]
     );
@@ -387,14 +387,14 @@ router.post('/me/claim', [
     );
 
     await pool.query(
-      `UPDATE parcels SET status = 'picked_up' WHERE id = $1`,
+      `UPDATE parcels SET status = 'assigned' WHERE id = $1`,
       [parcelId]
     );
 
     await pool.query(
       `INSERT INTO parcel_status_history (parcel_id, status, updated_by, notes)
        VALUES ($1, $2, $3, $4)`,
-      [parcelId, 'picked_up', req.user.id, 'Driver claimed parcel']
+      [parcelId, 'assigned', req.user.id, 'Driver claimed parcel (Assigned)']
     );
 
     notifyDriverAssignment(driverId, parcelId).catch((err) =>

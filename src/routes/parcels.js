@@ -349,7 +349,7 @@ router.post('/:id/confirm-delivery', [
 
 // Update parcel status (driver/admin only)
 router.put('/:id/status', [
-  body('status').isIn(['created', 'paid', 'picked_up', 'in_transit', 'out_for_delivery', 'delivered', 'failed', 'returned']),
+  body('status').isIn(['created', 'paid', 'assigned', 'picked_up', 'in_transit', 'out_for_delivery', 'delivered', 'failed', 'returned']),
   body('location').optional().trim(),
   body('notes').optional().trim(),
   body('deliveryCode').optional().trim()

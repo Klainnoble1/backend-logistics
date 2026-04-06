@@ -12,10 +12,18 @@ const router = express.Router();
 // Public tracking endpoint (no auth required) - must be before authenticate
 router.get('/track/:trackingId', async (req, res) => {
   try {
-    const { trackingId } = req.params;
+    const trackingId = String(req.params.trackingId || '').trim();
+
+    if (!trackingId) {
+      return res.status(400).json({ error: 'Tracking ID is required' });
+    }
 
     const result = await pool.query(
-      'SELECT * FROM parcels WHERE tracking_id = $1',
+      `SELECT *
+       FROM parcels
+       WHERE UPPER(tracking_id) = UPPER($1)
+          OR CAST(id AS TEXT) = $1
+       LIMIT 1`,
       [trackingId]
     );
 
@@ -36,6 +44,7 @@ router.get('/track/:trackingId', async (req, res) => {
 
     res.json({
       parcel: {
+        id: parcel.id,
         trackingId: parcel.tracking_id,
         status: parcel.status,
         currentLocation: parcel.current_location,

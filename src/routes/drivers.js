@@ -2,7 +2,7 @@ const express = require('express');
 const { body, validationResult } = require('express-validator');
 const pool = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
-const { notifyDriverAssignment } = require('../services/notificationService');
+const { notifyDriverAssignment, createNotification } = require('../services/notificationService');
 const { hasCompletedPaymentForParcel } = require('../services/paymentService');
 const { normalizeState } = require('../services/pricingService');
 
@@ -50,7 +50,10 @@ router.get('/available', authorize('admin'), async (req, res) => {
 router.get('/me', authorize('driver'), async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT d.id, d.status, d.state, d.license_number, d.vehicle_type, d.vehicle_plate, d.wallet_balance, d.completed_orders, d.average_rating, u.full_name, u.email, u.phone
+      `SELECT d.id, d.status, d.state, d.license_number, d.vehicle_type, d.vehicle_plate,
+              d.wallet_balance, d.completed_orders, d.average_rating,
+              d.bank_name, d.account_number, d.account_name,
+              u.full_name, u.email, u.phone
        FROM drivers d
        INNER JOIN users u ON d.user_id = u.id
        WHERE d.user_id = $1`,
@@ -71,6 +74,9 @@ router.get('/me', authorize('driver'), async (req, res) => {
         walletBalance: parseFloat(row.wallet_balance || 0),
         completedOrders: row.completed_orders || 0,
         averageRating: parseFloat(row.average_rating || 5.0),
+        bankName: row.bank_name || null,
+        accountNumber: row.account_number || null,
+        accountName: row.account_name || null,
         fullName: row.full_name,
         email: row.email,
         phone: row.phone,
@@ -636,6 +642,318 @@ router.put('/me/profile', [
   } catch (error) {
     console.error('Update driver profile error:', error);
     res.status(500).json({ error: 'Failed to update driver profile: ' + error.message });
+  }
+});
+
+// Save / update bank details (driver only)
+router.put('/me/bank', [
+  body('bankName').trim().notEmpty().withMessage('Bank name is required'),
+  body('accountNumber')
+    .trim()
+    .notEmpty().withMessage('Account number is required')
+    .isLength({ min: 10, max: 10 }).withMessage('Account number must be exactly 10 digits')
+    .isNumeric().withMessage('Account number must contain only digits'),
+  body('accountName').trim().notEmpty().withMessage('Account name is required'),
+], authorize('driver'), async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { bankName, accountNumber, accountName } = req.body;
+
+    const result = await pool.query(
+      `UPDATE drivers
+       SET bank_name = $1, account_number = $2, account_name = $3, updated_at = CURRENT_TIMESTAMP
+       WHERE user_id = $4
+       RETURNING id, bank_name, account_number, account_name`,
+      [bankName, accountNumber, accountName, req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Driver profile not found' });
+    }
+
+    const row = result.rows[0];
+    res.json({
+      message: 'Bank details saved successfully',
+      bankDetails: {
+        bankName: row.bank_name,
+        accountNumber: row.account_number,
+        accountName: row.account_name,
+      },
+    });
+  } catch (error) {
+    console.error('Save bank details error:', error);
+    res.status(500).json({ error: 'Failed to save bank details' });
+  }
+});
+
+// Request a withdrawal (driver only)
+// Min: ₦1,000 | Max: ₦2,000,000 per request
+router.post('/me/withdraw', [
+  body('amount')
+    .isFloat({ min: 1000, max: 2000000 })
+    .withMessage('Withdrawal amount must be between ₦1,000 and ₦2,000,000'),
+], authorize('driver'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const amount = parseFloat(req.body.amount);
+
+    await client.query('BEGIN');
+
+    // Fetch driver profile and bank details
+    const driverResult = await client.query(
+      `SELECT d.id, d.wallet_balance, d.bank_name, d.account_number, d.account_name, u.full_name
+       FROM drivers d
+       INNER JOIN users u ON d.user_id = u.id
+       WHERE d.user_id = $1
+       FOR UPDATE`,
+      [req.user.id]
+    );
+
+    if (driverResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Driver profile not found' });
+    }
+
+    const driver = driverResult.rows[0];
+
+    // Ensure bank details are set
+    if (!driver.bank_name || !driver.account_number || !driver.account_name) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Please add your bank details before requesting a withdrawal' });
+    }
+
+    // Check sufficient balance
+    const currentBalance = parseFloat(driver.wallet_balance || 0);
+    if (amount > currentBalance) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: `Insufficient balance. Your current balance is ₦${currentBalance.toFixed(2)}`,
+      });
+    }
+
+    // Deduct from wallet
+    await client.query(
+      'UPDATE drivers SET wallet_balance = wallet_balance - $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+      [amount, driver.id]
+    );
+
+    // Create withdrawal record
+    const withdrawalResult = await client.query(
+      `INSERT INTO withdrawals (driver_id, amount, status, bank_name, account_number, account_name)
+       VALUES ($1, $2, 'pending', $3, $4, $5)
+       RETURNING *`,
+      [driver.id, amount, driver.bank_name, driver.account_number, driver.account_name]
+    );
+
+    // Notify all admins
+    const adminResult = await client.query(
+      `SELECT id FROM users WHERE role = 'admin'`
+    );
+
+    const withdrawal = withdrawalResult.rows[0];
+    const notifyTitle = '💸 Withdrawal Request';
+    const notifyMsg = `Driver ${driver.full_name} requested a withdrawal of ₦${amount.toLocaleString('en-NG')}. Bank: ${driver.bank_name}, Acct: ${driver.account_number}.`;
+
+    for (const admin of adminResult.rows) {
+      await client.query(
+        `INSERT INTO notifications (user_id, parcel_id, type, title, message)
+         VALUES ($1, NULL, 'withdrawal_request', $2, $3)`,
+        [admin.id, notifyTitle, notifyMsg]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    res.status(201).json({
+      message: 'Withdrawal request submitted successfully. Admin will process your payment.',
+      withdrawal: {
+        id: withdrawal.id,
+        amount: parseFloat(withdrawal.amount),
+        status: withdrawal.status,
+        bankName: withdrawal.bank_name,
+        accountNumber: withdrawal.account_number,
+        accountName: withdrawal.account_name,
+        createdAt: withdrawal.created_at,
+      },
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Withdrawal request error:', error);
+    res.status(500).json({ error: 'Failed to process withdrawal request' });
+  } finally {
+    client.release();
+  }
+});
+
+// Get driver's own withdrawal history
+router.get('/me/withdrawals', authorize('driver'), async (req, res) => {
+  try {
+    const driverResult = await pool.query(
+      'SELECT id FROM drivers WHERE user_id = $1',
+      [req.user.id]
+    );
+    if (driverResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Driver profile not found' });
+    }
+    const driverId = driverResult.rows[0].id;
+
+    const result = await pool.query(
+      `SELECT * FROM withdrawals WHERE driver_id = $1 ORDER BY created_at DESC LIMIT 50`,
+      [driverId]
+    );
+
+    res.json({
+      withdrawals: result.rows.map((w) => ({
+        id: w.id,
+        amount: parseFloat(w.amount),
+        status: w.status,
+        bankName: w.bank_name,
+        accountNumber: w.account_number,
+        accountName: w.account_name,
+        notes: w.notes,
+        createdAt: w.created_at,
+        updatedAt: w.updated_at,
+      })),
+    });
+  } catch (error) {
+    console.error('Get withdrawals error:', error);
+    res.status(500).json({ error: 'Failed to get withdrawal history' });
+  }
+});
+
+// ── Admin: list all withdrawals ────────────────────────────────────────────────
+router.get('/admin/withdrawals', authorize('admin'), async (req, res) => {
+  try {
+    const { status } = req.query;
+    let query = `
+      SELECT w.*, u.full_name as driver_name, u.email as driver_email, u.phone as driver_phone
+      FROM withdrawals w
+      INNER JOIN drivers d ON w.driver_id = d.id
+      INNER JOIN users u ON d.user_id = u.id
+    `;
+    const params = [];
+    if (status) {
+      query += ' WHERE w.status = $1';
+      params.push(status);
+    }
+    query += ' ORDER BY w.created_at DESC';
+
+    const result = await pool.query(query, params);
+
+    res.json({
+      withdrawals: result.rows.map((w) => ({
+        id: w.id,
+        driverId: w.driver_id,
+        driverName: w.driver_name,
+        driverEmail: w.driver_email,
+        driverPhone: w.driver_phone,
+        amount: parseFloat(w.amount),
+        status: w.status,
+        bankName: w.bank_name,
+        accountNumber: w.account_number,
+        accountName: w.account_name,
+        notes: w.notes,
+        createdAt: w.created_at,
+        updatedAt: w.updated_at,
+      })),
+    });
+  } catch (error) {
+    console.error('Admin get withdrawals error:', error);
+    res.status(500).json({ error: 'Failed to get withdrawals' });
+  }
+});
+
+// Admin: update withdrawal status
+router.put('/admin/withdrawals/:id/status', [
+  body('status').isIn(['pending', 'processing', 'completed', 'failed']).withMessage('Invalid status'),
+  body('notes').optional().trim(),
+], authorize('admin'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { id } = req.params;
+    const { status, notes } = req.body;
+
+    await client.query('BEGIN');
+
+    const withdrawalResult = await client.query(
+      `SELECT w.*, d.user_id as driver_user_id, u.full_name as driver_name
+       FROM withdrawals w
+       INNER JOIN drivers d ON w.driver_id = d.id
+       INNER JOIN users u ON d.user_id = u.id
+       WHERE w.id = $1 FOR UPDATE`,
+      [id]
+    );
+
+    if (withdrawalResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Withdrawal not found' });
+    }
+
+    const withdrawal = withdrawalResult.rows[0];
+
+    // If marking as failed, refund the wallet
+    if (status === 'failed' && withdrawal.status !== 'failed') {
+      await client.query(
+        'UPDATE drivers SET wallet_balance = wallet_balance + $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2',
+        [withdrawal.amount, withdrawal.driver_id]
+      );
+    }
+
+    const updated = await client.query(
+      `UPDATE withdrawals
+       SET status = $1, notes = COALESCE($2, notes), updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3
+       RETURNING *`,
+      [status, notes || null, id]
+    );
+
+    // Notify the driver
+    const statusMsg = status === 'completed'
+      ? `Your withdrawal of ₦${parseFloat(withdrawal.amount).toLocaleString('en-NG')} has been processed and sent to your bank.`
+      : status === 'failed'
+      ? `Your withdrawal of ₦${parseFloat(withdrawal.amount).toLocaleString('en-NG')} could not be processed. The amount has been refunded to your wallet.`
+      : `Your withdrawal of ₦${parseFloat(withdrawal.amount).toLocaleString('en-NG')} is now ${status}.`;
+
+    await client.query(
+      `INSERT INTO notifications (user_id, parcel_id, type, title, message)
+       VALUES ($1, NULL, 'withdrawal_update', $2, $3)`,
+      [withdrawal.driver_user_id, '💰 Withdrawal Update', statusMsg]
+    );
+
+    // Admin audit log
+    await client.query(
+      `INSERT INTO audit_logs (admin_id, action, target_type, target_id, details, ip_address)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [req.user.id, 'UPDATE_WITHDRAWAL_STATUS', 'withdrawal', id,
+       JSON.stringify({ from: withdrawal.status, to: status, notes }), req.ip]
+    );
+
+    await client.query('COMMIT');
+
+    res.json({
+      message: `Withdrawal ${status} successfully`,
+      withdrawal: updated.rows[0],
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Update withdrawal status error:', error);
+    res.status(500).json({ error: 'Failed to update withdrawal status' });
+  } finally {
+    client.release();
   }
 });
 

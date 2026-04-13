@@ -15,10 +15,9 @@ router.use(authenticate);
 router.get('/', authorize('admin'), async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT d.*, u.email, u.full_name, u.phone, u.created_at as user_created_at
-       FROM drivers d
-       INNER JOIN users u ON d.user_id = u.id
-       ORDER BY u.created_at DESC`
+      `SELECT *, created_at as user_created_at
+       FROM drivers
+       ORDER BY created_at DESC`
     );
 
     res.json({ drivers: result.rows });
@@ -32,11 +31,10 @@ router.get('/', authorize('admin'), async (req, res) => {
 router.get('/available', authorize('admin'), async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT d.*, u.email, u.full_name, u.phone
-       FROM drivers d
-       INNER JOIN users u ON d.user_id = u.id
-       WHERE d.status = 'available'
-       ORDER BY u.full_name`
+      `SELECT *
+       FROM drivers
+       WHERE status = 'available'
+       ORDER BY full_name`
     );
 
     res.json({ drivers: result.rows });
@@ -50,13 +48,12 @@ router.get('/available', authorize('admin'), async (req, res) => {
 router.get('/me', authorize('driver'), async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT d.id, d.status, d.state, d.license_number, d.vehicle_type, d.vehicle_plate,
-              d.wallet_balance, d.completed_orders, d.average_rating,
-              d.bank_name, d.account_number, d.account_name,
-              u.full_name, u.email, u.phone
-       FROM drivers d
-       INNER JOIN users u ON d.user_id = u.id
-       WHERE d.user_id = $1`,
+      `SELECT id, status, state, license_number, vehicle_type, vehicle_plate,
+              wallet_balance, completed_orders, average_rating,
+              bank_name, account_number, account_name,
+              full_name, email, phone
+       FROM drivers
+       WHERE id = $1`,
       [req.user.id]
     );
     if (result.rows.length === 0) {
@@ -91,17 +88,18 @@ router.get('/me', authorize('driver'), async (req, res) => {
 // Get driver's own assignments
 router.get('/me/assignments', authorize('driver'), async (req, res) => {
   try {
-    // Get driver ID
-    const driverResult = await pool.query(
-      'SELECT id FROM drivers WHERE user_id = $1',
-      [req.user.id]
+    // No need to fetch driver ID, req.user.id IS the driver ID now
+    const driverId = req.user.id;
+    
+    // Check if driver profile exists
+    const driverCheck = await pool.query(
+      'SELECT id FROM drivers WHERE id = $1',
+      [driverId]
     );
 
-    if (driverResult.rows.length === 0) {
+    if (driverCheck.rows.length === 0) {
       return res.status(404).json({ error: 'Driver profile not found' });
     }
-
-    const driverId = driverResult.rows[0].id;
 
     // Get assignments with parcel details (alias a.id so it's not overwritten by p.id)
     const result = await pool.query(
@@ -190,7 +188,7 @@ router.post('/me/assignments/:id/accept', authorize('driver'), async (req, res) 
     const result = await pool.query(
       `UPDATE assignments 
        SET status = 'accepted', updated_at = CURRENT_TIMESTAMP 
-       WHERE id = $1 AND driver_id = (SELECT id FROM drivers WHERE user_id = $2)
+       WHERE id = $1 AND driver_id = $2
        RETURNING *`,
       [id, req.user.id]
     );
@@ -218,7 +216,7 @@ router.post('/me/assignments/:id/decline', authorize('driver'), async (req, res)
       `SELECT a.*, p.status as parcel_status 
        FROM assignments a 
        JOIN parcels p ON a.parcel_id = p.id 
-       WHERE a.id = $1 AND a.driver_id = (SELECT id FROM drivers WHERE user_id = $2)`,
+       WHERE a.id = $1 AND a.driver_id = $2`,
       [id, req.user.id]
     );
 
@@ -267,7 +265,7 @@ router.get('/me/available-parcels', authorize('driver'), async (req, res) => {
   try {
     // Get driver operating state
     const driverResult = await pool.query(
-      'SELECT state FROM drivers WHERE user_id = $1',
+      'SELECT state FROM drivers WHERE id = $1',
       [req.user.id]
     );
 
@@ -345,7 +343,7 @@ router.post('/me/claim', [
     const { parcelId } = req.body;
 
     const driverResult = await pool.query(
-      'SELECT id, status FROM drivers WHERE user_id = $1',
+      'SELECT id, status FROM drivers WHERE id = $1',
       [req.user.id]
     );
 
@@ -432,7 +430,7 @@ router.put('/me/status', [
     const result = await pool.query(
       `UPDATE drivers 
        SET status = $1, updated_at = CURRENT_TIMESTAMP
-       WHERE user_id = $2
+       WHERE id = $2
        RETURNING *`,
       [status, req.user.id]
     );
@@ -467,7 +465,7 @@ router.put('/me/location', [
     const result = await pool.query(
       `UPDATE drivers 
        SET current_location = POINT($1, $2), updated_at = CURRENT_TIMESTAMP
-       WHERE user_id = $3
+       WHERE id = $3
        RETURNING *`,
       [longitude, latitude, req.user.id]
     );
@@ -624,7 +622,7 @@ router.put('/me/profile', [
 
     const queryStr = `UPDATE drivers 
        SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP
-       WHERE user_id = $${paramCount}
+       WHERE id = $${paramCount}
        RETURNING *`;
     console.log('EXECUTING QUERY:', queryStr);
     console.log('WITH VALUES:', values);
@@ -666,7 +664,7 @@ router.put('/me/bank', [
     const result = await pool.query(
       `UPDATE drivers
        SET bank_name = $1, account_number = $2, account_name = $3, updated_at = CURRENT_TIMESTAMP
-       WHERE user_id = $4
+       WHERE id = $4
        RETURNING id, bank_name, account_number, account_name`,
       [bankName, accountNumber, accountName, req.user.id]
     );
@@ -710,10 +708,9 @@ router.post('/me/withdraw', [
 
     // Fetch driver profile and bank details
     const driverResult = await client.query(
-      `SELECT d.id, d.wallet_balance, d.bank_name, d.account_number, d.account_name, u.full_name
+      `SELECT d.id, d.wallet_balance, d.bank_name, d.account_number, d.account_name, d.full_name
        FROM drivers d
-       INNER JOIN users u ON d.user_id = u.id
-       WHERE d.user_id = $1
+       WHERE d.id = $1
        FOR UPDATE`,
       [req.user.id]
     );
@@ -798,7 +795,7 @@ router.post('/me/withdraw', [
 router.get('/me/withdrawals', authorize('driver'), async (req, res) => {
   try {
     const driverResult = await pool.query(
-      'SELECT id FROM drivers WHERE user_id = $1',
+      'SELECT id FROM drivers WHERE id = $1',
       [req.user.id]
     );
     if (driverResult.rows.length === 0) {

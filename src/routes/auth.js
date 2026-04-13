@@ -24,61 +24,64 @@ router.post('/register', [
 
     const { email, password, fullName, phone, role = 'customer' } = req.body;
     const phoneVal = phone != null && String(phone).trim() !== '' ? String(phone).trim() : null;
+    const table = role === 'driver' ? 'drivers' : 'users';
 
-    // Check if user exists (email always; phone only when provided)
-    let existingUser;
+    // Check if account exists in the specific table
+    let existingAccount;
     if (phoneVal) {
-      existingUser = await pool.query(
-        'SELECT id FROM users WHERE email = $1 OR phone = $2',
+      existingAccount = await pool.query(
+        `SELECT id FROM ${table} WHERE email = $1 OR phone = $2`,
         [email, phoneVal]
       );
     } else {
-      existingUser = await pool.query(
-        'SELECT id FROM users WHERE email = $1',
+      existingAccount = await pool.query(
+        `SELECT id FROM ${table} WHERE email = $1`,
         [email]
       );
     }
 
-    if (existingUser.rows.length > 0) {
-      return res.status(400).json({ error: 'A user with this email or phone already exists' });
+    if (existingAccount.rows.length > 0) {
+      return res.status(400).json({ error: `A ${role} with this email or phone already exists` });
     }
 
     // Hash password
     const passwordHash = await bcrypt.hash(password, 10);
 
-    // Create user
-    const result = await pool.query(
-      `INSERT INTO users (email, phone, password_hash, full_name, role)
-       VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, email, full_name, role, created_at`,
-      [email, phoneVal, passwordHash, fullName, role]
-    );
-
-    const user = result.rows[0];
-
-    // If driver, create driver record
-    if (role === 'driver') {
-      await pool.query(
-        'INSERT INTO drivers (user_id) VALUES ($1)',
-        [user.id]
+    // Create account in the specific table
+    let result;
+    if (table === 'drivers') {
+      result = await pool.query(
+        `INSERT INTO drivers (email, phone, password_hash, full_name, status)
+         VALUES ($1, $2, $3, $4, 'offline')
+         RETURNING id, email, full_name, created_at`,
+        [email, phoneVal, passwordHash, fullName]
+      );
+    } else {
+      result = await pool.query(
+        `INSERT INTO users (email, phone, password_hash, full_name, role)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, email, full_name, role, created_at`,
+        [email, phoneVal, passwordHash, fullName, role]
       );
     }
 
-    // Generate token
+    const account = result.rows[0];
+
+    // Generate token with accountType
     const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
+      { userId: account.id, email: account.email, role: table === 'drivers' ? 'driver' : account.role, accountType: table === 'drivers' ? 'driver' : 'user' },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
     );
 
     res.status(201).json({
-      message: 'User registered successfully',
+      message: `${role === 'driver' ? 'Driver' : 'User'} registered successfully`,
       token,
       user: {
-        id: user.id,
-        email: user.email,
-        fullName: user.full_name,
-        role: user.role
+        id: account.id,
+        email: account.email,
+        fullName: account.full_name,
+        role: table === 'drivers' ? 'driver' : account.role
       }
     });
   } catch (error) {
@@ -98,34 +101,35 @@ router.post('/login', [
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { email, password } = req.body;
+    const { email, password, role = 'customer' } = req.body;
+    const table = role === 'driver' ? 'drivers' : 'users';
 
-    // Find user
+    // Find account in the specific table
     const result = await pool.query(
-      'SELECT id, email, password_hash, full_name, role, is_active FROM users WHERE email = $1',
+      `SELECT id, email, password_hash, full_name, ${table === 'users' ? 'role,' : ''} is_active FROM ${table} WHERE email = $1`,
       [email]
     );
 
     if (result.rows.length === 0) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+      return res.status(401).json({ error: `Invalid ${role} credentials` });
     }
 
-    const user = result.rows[0];
+    const account = result.rows[0];
 
-    if (!user.is_active) {
+    if (!account.is_active) {
       return res.status(401).json({ error: 'Account is inactive' });
     }
 
     // Verify password
-    const isValid = await bcrypt.compare(password, user.password_hash);
+    const isValid = await bcrypt.compare(password, account.password_hash);
 
     if (!isValid) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+      return res.status(401).json({ error: `Invalid ${role} credentials` });
     }
 
-    // Generate token
+    // Generate token with accountType
     const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
+      { userId: account.id, email: account.email, role: table === 'drivers' ? 'driver' : account.role, accountType: table === 'drivers' ? 'driver' : 'user' },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
     );
@@ -134,10 +138,10 @@ router.post('/login', [
       message: 'Login successful',
       token,
       user: {
-        id: user.id,
-        email: user.email,
-        fullName: user.full_name,
-        role: user.role
+        id: account.id,
+        email: account.email,
+        fullName: account.full_name,
+        role: table === 'drivers' ? 'driver' : account.role
       }
     });
   } catch (error) {

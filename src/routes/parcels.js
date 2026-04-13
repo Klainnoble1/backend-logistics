@@ -34,9 +34,10 @@ router.get('/track/:trackingId', async (req, res) => {
     const parcel = result.rows[0];
 
     const historyResult = await pool.query(
-      `SELECT psh.*, u.full_name as updated_by_name
+      `SELECT psh.*, COALESCE(u.full_name, d.full_name, 'System') as updated_by_name
        FROM parcel_status_history psh
        LEFT JOIN users u ON psh.updated_by = u.id
+       LEFT JOIN drivers d ON psh.updated_by = d.id
        WHERE psh.parcel_id = $1
        ORDER BY psh.created_at DESC`,
       [parcel.id]
@@ -213,7 +214,7 @@ router.get('/', async (req, res) => {
         FROM parcels p
         INNER JOIN assignments a ON p.id = a.parcel_id
         INNER JOIN drivers d ON a.driver_id = d.id
-        WHERE d.user_id = $1
+        WHERE d.id = $1
         ORDER BY p.created_at DESC
       `;
       params = [req.user.id];
@@ -260,7 +261,7 @@ router.get('/:id', async (req, res) => {
         FROM parcels p
         INNER JOIN assignments a ON p.id = a.parcel_id
         INNER JOIN drivers d ON a.driver_id = d.id
-        WHERE p.id = $1 AND d.user_id = $2
+        WHERE p.id = $1 AND d.id = $2
       `;
       params = [id, req.user.id];
     } else {
@@ -283,9 +284,10 @@ router.get('/:id', async (req, res) => {
 
     // Get status history
     const historyResult = await pool.query(
-      `SELECT psh.*, u.full_name as updated_by_name
+      `SELECT psh.*, COALESCE(u.full_name, d.full_name, 'System') as updated_by_name
        FROM parcel_status_history psh
        LEFT JOIN users u ON psh.updated_by = u.id
+       LEFT JOIN drivers d ON psh.updated_by = d.id
        WHERE psh.parcel_id = $1
        ORDER BY psh.created_at DESC`,
       [id]
@@ -390,7 +392,7 @@ router.put('/:id/status', [
         SELECT p.* FROM parcels p
         INNER JOIN assignments a ON p.id = a.parcel_id
         INNER JOIN drivers d ON a.driver_id = d.id
-        WHERE p.id = $1 AND d.user_id = $2
+        WHERE p.id = $1 AND d.id = $2
       `;
       parcelParams = [id, req.user.id];
     } else {

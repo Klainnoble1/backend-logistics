@@ -11,20 +11,24 @@ const authenticate = async (req, res, next) => {
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     
-    // Verify user still exists and is active
+    // Choose table based on accountType in token (defaults to 'users' for old tokens)
+    const table = decoded.accountType === 'driver' ? 'drivers' : 'users';
+    
+    // Verify account still exists and is active
     const result = await pool.query(
-      'SELECT id, email, role, is_active FROM users WHERE id = $1',
+      `SELECT id, email, ${table === 'users' ? 'role,' : ''} is_active FROM ${table} WHERE id = $1`,
       [decoded.userId]
     );
 
     if (result.rows.length === 0 || !result.rows[0].is_active) {
-      return res.status(401).json({ error: 'Invalid or inactive user' });
+      return res.status(401).json({ error: 'Invalid or inactive account' });
     }
 
     req.user = {
       id: result.rows[0].id,
       email: result.rows[0].email,
-      role: result.rows[0].role
+      role: table === 'users' ? result.rows[0].role : 'driver',
+      accountType: table === 'users' ? 'user' : 'driver'
     };
 
     next();

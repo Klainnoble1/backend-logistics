@@ -93,12 +93,7 @@ async function notifyStatusUpdate(parcelId, status, userId) {
 // Notify driver about new assignment (in-app + push with sound)
 async function notifyDriverAssignment(driverId, parcelId) {
   try {
-    const driverResult = await pool.query(
-      'SELECT user_id FROM drivers WHERE id = $1',
-      [driverId]
-    );
-    if (driverResult.rows.length === 0) return;
-    const userId = driverResult.rows[0].user_id;
+    const userId = driverId; // driverId is now the primary identity ID for drivers
 
     const parcelResult = await pool.query(
       'SELECT tracking_id FROM parcels WHERE id = $1',
@@ -124,12 +119,7 @@ async function notifyDriverAssignment(driverId, parcelId) {
 // Notify driver when customer submits a review (in-app + push with sound)
 async function notifyDriverReview(driverId, parcelId, rating, reviewComment) {
   try {
-    const driverResult = await pool.query(
-      'SELECT user_id FROM drivers WHERE id = $1',
-      [driverId]
-    );
-    if (driverResult.rows.length === 0) return;
-    const userId = driverResult.rows[0].user_id;
+    const userId = driverId; // driverId is now the primary identity ID for drivers
 
     const parcelResult = await pool.query(
       'SELECT tracking_id FROM parcels WHERE id = $1',
@@ -165,9 +155,9 @@ async function notifyDriversNewParcelAvailable(parcelId, trackingId) {
     const state = parcelResult.rows[0].pickup_state;
 
     let query = `
-      SELECT DISTINCT d.user_id
+      SELECT DISTINCT d.id as account_id
       FROM drivers d
-      INNER JOIN user_push_tokens t ON t.user_id = d.user_id
+      INNER JOIN user_push_tokens t ON t.user_id = d.id
       WHERE d.status = 'available'
     `;
     let params = [];
@@ -183,8 +173,8 @@ async function notifyDriversNewParcelAvailable(parcelId, trackingId) {
     const message = `New parcel ${trackingId} is available in your area`;
     
     for (const row of result.rows) {
-      await createNotification(row.user_id, parcelId, 'new_parcel_available', title, message);
-      await sendPushToUser(row.user_id, title, message, {
+      await createNotification(row.account_id, parcelId, 'new_parcel_available', title, message);
+      await sendPushToUser(row.account_id, title, message, {
         type: 'new_parcel_available',
         parcelId,
         trackingId,

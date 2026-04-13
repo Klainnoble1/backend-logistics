@@ -115,7 +115,11 @@ router.post('/users', [
     await logAudit(req.user.id, 'CREATE_USER', 'user', user.id, { email, role, fullName }, req.ip);
 
     if (role === 'driver') {
-      await pool.query('INSERT INTO drivers (user_id) VALUES ($1)', [user.id]);
+      await pool.query(
+        `INSERT INTO drivers (email, phone, password_hash, full_name, status)
+         VALUES ($1, $2, $3, $4, 'offline')`,
+        [email, phone || null, passwordHash, fullName]
+      );
     }
 
     res.status(201).json({
@@ -326,12 +330,11 @@ router.get('/parcels', async (req, res) => {
     let query = `
       SELECT p.*, u.full_name as sender_name, u.email as sender_email,
              a.id as assignment_id, a.driver_id as assigned_driver_id,
-             du.full_name as assigned_driver_name
+             dr.full_name as assigned_driver_name
       FROM parcels p
       INNER JOIN users u ON p.sender_id = u.id
       LEFT JOIN assignments a ON a.parcel_id = p.id
       LEFT JOIN drivers dr ON dr.id = a.driver_id
-      LEFT JOIN users du ON du.id = dr.user_id
     `;
     const params = [];
     let paramCount = 1;

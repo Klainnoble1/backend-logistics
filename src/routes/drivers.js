@@ -832,10 +832,9 @@ router.get('/admin/withdrawals', authorize('admin'), async (req, res) => {
   try {
     const { status } = req.query;
     let query = `
-      SELECT w.*, u.full_name as driver_name, u.email as driver_email, u.phone as driver_phone
+      SELECT w.*, d.full_name as driver_name, d.email as driver_email, d.phone as driver_phone
       FROM withdrawals w
       INNER JOIN drivers d ON w.driver_id = d.id
-      INNER JOIN users u ON d.user_id = u.id
     `;
     const params = [];
     if (status) {
@@ -887,10 +886,9 @@ router.put('/admin/withdrawals/:id/status', [
     await client.query('BEGIN');
 
     const withdrawalResult = await client.query(
-      `SELECT w.*, d.user_id as driver_user_id, u.full_name as driver_name
+      `SELECT w.*, d.full_name as driver_name
        FROM withdrawals w
        INNER JOIN drivers d ON w.driver_id = d.id
-       INNER JOIN users u ON d.user_id = u.id
        WHERE w.id = $1 FOR UPDATE`,
       [id]
     );
@@ -928,7 +926,7 @@ router.put('/admin/withdrawals/:id/status', [
     await client.query(
       `INSERT INTO notifications (user_id, parcel_id, type, title, message)
        VALUES ($1, NULL, 'withdrawal_update', $2, $3)`,
-      [withdrawal.driver_user_id, '💰 Withdrawal Update', statusMsg]
+      [withdrawal.driver_id, '💰 Withdrawal Update', statusMsg]
     );
 
     // Admin audit log

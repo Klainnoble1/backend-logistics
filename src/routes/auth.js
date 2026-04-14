@@ -180,8 +180,9 @@ router.post('/push-token', [
 // Get current user
 router.get('/me', authenticate, async (req, res) => {
   try {
+    const table = req.user.accountType === 'driver' ? 'drivers' : 'users';
     const result = await pool.query(
-      'SELECT id, email, phone, full_name, role, created_at FROM users WHERE id = $1',
+      `SELECT id, email, phone, full_name, ${table === 'users' ? 'role,' : ''} created_at FROM ${table} WHERE id = $1`,
       [req.user.id]
     );
 
@@ -190,14 +191,13 @@ router.get('/me', authenticate, async (req, res) => {
     }
 
     const dbUser = result.rows[0];
-    // Format user to match frontend expectations
     res.json({
       user: {
         id: dbUser.id,
         email: dbUser.email,
         fullName: dbUser.full_name,
         phone: dbUser.phone,
-        role: dbUser.role,
+        role: req.user.accountType === 'driver' ? 'driver' : dbUser.role,
         createdAt: dbUser.created_at
       }
     });
@@ -219,6 +219,7 @@ router.put('/profile', [
     }
 
     const { fullName, phone } = req.body;
+    const table = req.user.accountType === 'driver' ? 'drivers' : 'users';
     const updates = [];
     const values = [];
     let paramCount = 1;
@@ -238,9 +239,9 @@ router.put('/profile', [
 
     values.push(req.user.id);
     const result = await pool.query(
-      `UPDATE users SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP
+      `UPDATE ${table} SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP
        WHERE id = $${paramCount}
-       RETURNING id, email, phone, full_name, role, created_at`,
+       RETURNING id, email, phone, full_name, ${table === 'users' ? 'role,' : ''} created_at`,
       values
     );
 
@@ -255,7 +256,7 @@ router.put('/profile', [
         email: dbUser.email,
         fullName: dbUser.full_name,
         phone: dbUser.phone,
-        role: dbUser.role,
+        role: req.user.accountType === 'driver' ? 'driver' : dbUser.role,
         createdAt: dbUser.created_at
       }
     });
@@ -277,10 +278,20 @@ router.post('/password-reset', [
 
     const { email } = req.body;
 
-    const result = await pool.query(
+    // Check users table first, then drivers
+    let result = await pool.query(
       'SELECT id FROM users WHERE email = $1',
       [email]
     );
+
+    let foundInTable = 'users';
+    if (result.rows.length === 0) {
+      result = await pool.query(
+        'SELECT id FROM drivers WHERE email = $1',
+        [email]
+      );
+      foundInTable = 'drivers';
+    }
 
     if (result.rows.length === 0) {
       return res.json({ message: 'If that email is registered, you will receive reset instructions.' });
@@ -290,6 +301,7 @@ router.post('/password-reset', [
     const token = crypto.randomBytes(32).toString('hex');
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
+    // Note: password_reset_tokens doesn't have a table column, but the ID is unique across both
     await pool.query(
       'INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)',
       [userId, token, expiresAt]

@@ -5,14 +5,20 @@ let poolConfig;
 
 if (process.env.DATABASE_URL) {
   try {
-    const url = new URL(process.env.DATABASE_URL);
+    // Force allow self-signed certs globally for this process if it's failing at the pool level
+    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
+    // Strip sslmode=require if it exists as it can override the pg-pool ssl setting
+    let connectionString = process.env.DATABASE_URL;
+    if (connectionString.includes('sslmode=require')) {
+      connectionString = connectionString.replace(/[\?&]sslmode=require/, '');
+    }
+
     poolConfig = {
-      host: url.hostname,
-      port: parseInt(url.port) || 5432,
-      database: url.pathname.slice(1) || 'postgres',
-      user: url.username,
-      password: url.password,
-      ssl: { rejectUnauthorized: false },
+      connectionString: connectionString,
+      ssl: { 
+        rejectUnauthorized: false 
+      },
       max: 20,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 30000,
@@ -28,9 +34,9 @@ if (!poolConfig) {
     database: process.env.DB_NAME || 'postgres',
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
-    ssl: process.env.DB_SSL === 'true' || process.env.DB_SSL === 'require'
-      ? { rejectUnauthorized: false }
-      : false,
+    ssl: { 
+      rejectUnauthorized: false 
+    },
     max: 20,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 30000,

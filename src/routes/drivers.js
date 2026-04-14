@@ -551,17 +551,17 @@ router.post('/:driverId/assign', [
       ['busy', driverId]
     );
 
-    // Update parcel status
+    // Update parcel status to 'assigned' (not picked up yet)
     await pool.query(
-      `UPDATE parcels SET status = 'picked_up' WHERE id = $1`,
+      `UPDATE parcels SET status = 'assigned' WHERE id = $1`,
       [parcelId]
     );
-
+ 
     // Add to status history
     await pool.query(
       `INSERT INTO parcel_status_history (parcel_id, status, updated_by, notes)
        VALUES ($1, $2, $3, $4)`,
-      [parcelId, 'picked_up', req.user.id, 'Parcel assigned to driver']
+      [parcelId, 'assigned', req.user.id, 'Parcel assigned to driver (Waiting for pickup)']
     );
 
     notifyDriverAssignment(driverId, parcelId).catch((err) =>

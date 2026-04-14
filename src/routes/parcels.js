@@ -51,7 +51,7 @@ router.get('/track/:trackingId', async (req, res) => {
         currentLocation: parcel.current_location,
         estimatedDeliveryDate: parcel.estimated_delivery_date,
         recipientName: parcel.recipient_name,
-        deliveryCode: parcel.delivery_code // Include delivery code for tracking
+        // Removed deliveryCode for security: only sender/admin should see it
       },
       statusHistory: historyResult.rows
     });

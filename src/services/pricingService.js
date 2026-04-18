@@ -1,10 +1,11 @@
 const pool = require('../config/database');
 const axios = require('axios');
 
-// Mapbox - better coverage in Nigeria. Token in MAPBOX_ACCESS_TOKEN.
-const MAPBOX_BASE = 'https://api.mapbox.com/geocoding/v5/mapbox.places';
+// Google Maps APIs
+const GOOGLE_GEOCODING_BASE = 'https://maps.googleapis.com/maps/api/geocode/json';
+const GOOGLE_DISTANCE_MATRIX_BASE = 'https://maps.googleapis.com/maps/api/distancematrix/json';
 
-// Nominatim (OpenStreetMap) - fallback, no API key. Use 1 req/sec.
+// Nominatim (OpenStreetMap) - last-resort fallback if Google key not set
 const NOMINATIM_BASE = 'https://nominatim.openstreetmap.org/search';
 const USER_AGENT = 'OprimeLogistics/1.0 (contact@example.com)';
 
@@ -16,7 +17,7 @@ function sleep(ms) {
 function normalizeState(name) {
   if (!name) return null;
   let s = String(name).toLowerCase().trim();
-  
+
   // Map common variants of Abuja/FCT first
   if (s.includes('federal capital territory') || s === 'fct' || s === 'abuja') {
     return 'abuja';
@@ -24,37 +25,55 @@ function normalizeState(name) {
 
   // Remove common suffixes
   s = s.replace(/\s+(state|province|region|territory)$/gi, '');
-  
+
   return s.trim();
 }
 
-/** Geocode one address via Mapbox (when token set) or Nominatim (fallback). Returns { lat, lon } or null. */
+/**
+ * Extract state name from Google Geocoding API address_components array.
+ * Google returns administrative_area_level_1 as the state/region.
+ */
+function extractStateFromGoogleComponents(addressComponents) {
+  if (!Array.isArray(addressComponents)) return null;
+  const stateComponent = addressComponents.find(
+    (c) => Array.isArray(c.types) && c.types.includes('administrative_area_level_1')
+  );
+  return stateComponent ? stateComponent.long_name : null;
+}
+
+/**
+ * Geocode one address via Google Geocoding API (primary) or Nominatim (fallback).
+ * Returns { lat, lon, state } or null.
+ */
 async function geocodeAddress(address) {
-  const mapboxToken = process.env.MAPBOX_ACCESS_TOKEN;
-  if (mapboxToken) {
+  const googleKey = process.env.GOOGLE_MAPS_API_KEY;
+
+  if (googleKey) {
     try {
-      const url = `${MAPBOX_BASE}/${encodeURIComponent(address)}.json`;
-      const res = await axios.get(url, {
-        params: { access_token: mapboxToken, limit: 1, country: 'NG' },
+      const res = await axios.get(GOOGLE_GEOCODING_BASE, {
+        params: {
+          address: `${address}, Nigeria`,
+          key: googleKey,
+          region: 'ng',
+        },
         timeout: 10000,
       });
-      if (res.data?.features?.length > 0) {
-        const feature = res.data.features[0];
-        const [lon, lat] = feature.center;
-        
-        // Extract state from Mapbox context
-        let state = null;
-        if (feature.context) {
-          const region = feature.context.find(ctx => ctx.id.startsWith('region.'));
-          if (region) state = region.text;
-        }
-        
-        return { lat: parseFloat(lat), lon: parseFloat(lon), state };
+
+      if (res.data?.status === 'OK' && res.data.results?.length > 0) {
+        const result = res.data.results[0];
+        const { lat, lng } = result.geometry.location;
+        const state = extractStateFromGoogleComponents(result.address_components);
+        return { lat: parseFloat(lat), lon: parseFloat(lng), state };
       }
+
+      console.warn('Google Geocoding returned no results for:', address, '| Status:', res.data?.status);
     } catch (err) {
-      console.warn('Mapbox geocode failed, falling back to Nominatim:', err.message);
+      console.warn('Google Geocoding failed, falling back to Nominatim:', err.message);
     }
   }
+
+  // Fallback: Nominatim (no API key required — rate limited to 1 req/sec)
+  await sleep(1100);
   const res = await axios.get(NOMINATIM_BASE, {
     params: { q: address, format: 'json', limit: 1, addressdetails: 1 },
     headers: { 'User-Agent': USER_AGENT },
@@ -62,14 +81,14 @@ async function geocodeAddress(address) {
   });
   if (!res.data || res.data.length === 0) return null;
   const first = res.data[0];
-  return { 
-    lat: parseFloat(first.lat), 
+  return {
+    lat: parseFloat(first.lat),
     lon: parseFloat(first.lon),
-    state: first.address?.state || first.address?.province || null
+    state: first.address?.state || first.address?.province || null,
   };
 }
 
-/** Haversine distance in km (fallback when OSRM unavailable) */
+/** Haversine distance in km (last-resort fallback if all APIs fail) */
 function haversineKm(p1, p2) {
   const R = 6371;
   const dLat = ((p2.lat - p1.lat) * Math.PI) / 180;
@@ -81,41 +100,59 @@ function haversineKm(p1, p2) {
   return R * c;
 }
 
-/** OSRM public demo - road distance & duration. Coords: lon,lat. Returns { distanceKm, durationMinutes } or null */
-const OSRM_BASE = 'https://router.project-osrm.org/route/v1/driving';
-
+/**
+ * Google Distance Matrix API - real road distance & drive duration.
+ * Returns { distanceKm, durationMinutes } or null if unavailable.
+ */
 async function getRoadDistanceAndDuration(pickup, delivery) {
-  try {
-    const url = `${OSRM_BASE}/${pickup.lon},${pickup.lat};${delivery.lon},${delivery.lat}?overview=false`;
-    const res = await axios.get(url, { timeout: 8000 });
-    if (!res.data?.routes?.length) return null;
-    const route = res.data.routes[0];
-    const distanceKm = (route.distance || 0) / 1000;
-    const durationMinutes = (route.duration || 0) / 60;
-    return {
-      distanceKm: Math.round(distanceKm * 10) / 10,
-      durationMinutes: Math.round(durationMinutes),
-    };
-  } catch (err) {
-    console.warn('OSRM route failed, using straight-line distance:', err.message);
-    return null;
+  const googleKey = process.env.GOOGLE_MAPS_API_KEY;
+
+  if (googleKey) {
+    try {
+      const res = await axios.get(GOOGLE_DISTANCE_MATRIX_BASE, {
+        params: {
+          origins: `${pickup.lat},${pickup.lon}`,
+          destinations: `${delivery.lat},${delivery.lon}`,
+          mode: 'driving',
+          key: googleKey,
+          region: 'ng',
+        },
+        timeout: 10000,
+      });
+
+      const element = res.data?.rows?.[0]?.elements?.[0];
+      if (element?.status === 'OK') {
+        const distanceKm = (element.distance?.value || 0) / 1000;
+        const durationMinutes = (element.duration?.value || 0) / 60;
+        return {
+          distanceKm: Math.round(distanceKm * 10) / 10,
+          durationMinutes: Math.round(durationMinutes),
+        };
+      }
+
+      console.warn('Google Distance Matrix returned status:', element?.status);
+    } catch (err) {
+      console.warn('Google Distance Matrix failed, using haversine fallback:', err.message);
+    }
   }
+
+  return null;
 }
 
 /**
  * Calculate road distance (and duration) between two addresses.
- * Uses Nominatim (geocode) + OSRM (road route). Falls back to Haversine if OSRM fails.
- * Returns { distanceKm, durationMinutes } (durationMinutes may be null if fallback).
+ * Uses Google Geocoding API + Google Distance Matrix API.
+ * Falls back to Nominatim geocoding + Haversine if Google key not configured.
+ * Returns { distanceKm, durationMinutes, pickupState, deliveryState }.
  */
 async function calculateDistance(pickupAddress, deliveryAddress) {
   try {
     const pickup = await geocodeAddress(pickupAddress);
-    if (!process.env.MAPBOX_ACCESS_TOKEN) await sleep(1100);
     const delivery = await geocodeAddress(deliveryAddress);
 
     if (!pickup || !delivery) {
       const failed = !pickup ? 'pickup' : (!delivery ? 'delivery' : 'both');
-      console.warn(`Geocoding failed for ${failed} address. Check MAPBOX_ACCESS_TOKEN or addresses.`);
+      console.warn(`Geocoding failed for ${failed} address. Check GOOGLE_MAPS_API_KEY or verify the address is valid.`);
       // Default to 5km if geocoding fails to be slightly more realistic for intra-city
       return { distanceKm: 5, durationMinutes: null, pickupState: null, deliveryState: null };
     }

@@ -163,9 +163,14 @@ router.post('/google', [
     const table = role === 'driver' ? 'drivers' : 'users';
 
     // 1. Verify Google Token
+    // 1. Verify Google Token
     const clientIds = [
       process.env.GOOGLE_CLIENT_ID,
       process.env.GOOGLE_CLIENT_ID_DRIVER,
+      process.env.GOOGLE_CLIENT_ID_IOS,
+      process.env.GOOGLE_CLIENT_ID_ANDROID,
+      process.env.GOOGLE_CLIENT_ID_DRIVER_IOS,
+      process.env.GOOGLE_CLIENT_ID_DRIVER_ANDROID,
       '569746147360-5mc4elhn9i5na1ogbpmusk3k5tog0g2p.apps.googleusercontent.com', // User App Web ID
       '569746147360-rrl47k24ibrugtr8eo9u8nak4fu3lriq.apps.googleusercontent.com', // User App iOS ID
       '569746147360-u0114q12kubma4tlklmvdag3d5nuohdb.apps.googleusercontent.com', // Driver App Web ID
@@ -173,10 +178,22 @@ router.post('/google', [
       '569746147360-t260d2s48opec01s37q5lr26ofhnk8qm.apps.googleusercontent.com'  // Original ID
     ].filter(id => !!id);
 
-    const ticket = await googleClient.verifyIdToken({
-      idToken,
-      audience: clientIds,
-    });
+    console.log('[GoogleAuth] Attempting to verify token for role:', role);
+    console.log('[GoogleAuth] Allowed Client IDs:', clientIds);
+
+    let ticket;
+    try {
+      ticket = await googleClient.verifyIdToken({
+        idToken,
+        audience: clientIds,
+      });
+    } catch (err) {
+      console.error('[GoogleAuth] Token verification failed:', err.message);
+      return res.status(401).json({ 
+        error: 'Google token verification failed', 
+        details: err.message 
+      });
+    }
     const payload = ticket.getPayload();
     const { email, name, picture, sub: googleId } = payload;
 

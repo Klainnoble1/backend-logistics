@@ -2,6 +2,7 @@ require('dotenv').config();
 const pool = require('./src/config/database');
 const crypto = require('crypto');
 const generateDeliveryCode = require('./src/utils/generateDeliveryCode');
+const { calculatePrice } = require('./src/services/pricingService');
 
 async function createTestOrder() {
   try {
@@ -14,9 +15,23 @@ async function createTestOrder() {
     }
     const userId = userRes.rows[0].id;
     
+    // 1. Define test addresses
+    const pickupAddress = 'Allen Avenue, Ikeja, Lagos';
+    const deliveryAddress = 'Adetokunbo Ademola Street, Victoria Island, Lagos';
+    const weight = 3.5;
+    const serviceType = 'standard';
+    const insurance = false;
+
+    console.log('--- Step 1: Calculating price via Google Maps ---');
+    const pricing = await calculatePrice(pickupAddress, deliveryAddress, weight, serviceType, insurance);
+    console.log(`Distance: ${pricing.distance} km`);
+    console.log(`Price: ₦${pricing.price}`);
+    console.log(`States: ${pricing.pickupState} -> ${pricing.deliveryState}`);
+
     const trackingId = 'TRK' + crypto.randomBytes(4).toString('hex').toUpperCase();
     const deliveryCode = generateDeliveryCode();
     
+    console.log('\n--- Step 2: Inserting into database ---');
     const parcelRes = await pool.query(
       `INSERT INTO parcels (
         tracking_id, sender_id, recipient_name, recipient_phone, 
@@ -26,16 +41,16 @@ async function createTestOrder() {
       [
         trackingId, 
         userId, 
-        'Moyo (Test Recipient 2)', 
+        'Test Recipient (Google Map Test)', 
         '08012345678', 
-        'Bodija Market Road, Oyo', 
-        'UI Campus area, Oyo', 
-        3.5, 
-        'standard', 
+        pickupAddress, 
+        deliveryAddress, 
+        weight, 
+        serviceType, 
         'paid', 
-        2500.00,
-        'oyo',
-        'oyo',
+        pricing.price,
+        pricing.pickupState || 'lagos',
+        pricing.deliveryState || 'lagos',
         deliveryCode
       ]
     );
@@ -43,13 +58,14 @@ async function createTestOrder() {
     const parcelId = parcelRes.rows[0].id;
     
     await pool.query(
-      `INSERT INTO payments (parcel_id, user_id, amount, payment_method, payment_status, transaction_id)
+      `INSERT INTO payments (parcel_id, user_id, amount, payment_status, transaction_id, payment_method)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [parcelId, userId, 2500.00, 'paystack', 'completed', 'TEST_TXN_' + trackingId]
+      [parcelId, userId, pricing.price, 'completed', 'TEST_TXN_' + trackingId, 'paystack']
     );
     
-    console.log('Test order created successfully!');
+    console.log('\n✅ Test order created successfully!');
     console.log('Tracking ID:', trackingId);
+    console.log('Final Price:', pricing.price);
     console.log('Delivery Code:', deliveryCode);
     process.exit(0);
   } catch (error) {

@@ -2,7 +2,10 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const { OAuth2Client } = require('google-auth-library');
 const { body, validationResult } = require('express-validator');
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 const pool = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 
@@ -147,6 +150,106 @@ router.post('/login', [
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+// Google Sign-In / Sign-Up
+router.post('/google', [
+  body('idToken').notEmpty(),
+  body('role').optional().isIn(['customer', 'driver'])
+], async (req, res) => {
+  try {
+    const { idToken, role = 'customer' } = req.body;
+    const table = role === 'driver' ? 'drivers' : 'users';
+
+    // 1. Verify Google Token
+    const clientIds = [
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_ID_DRIVER,
+      '569746147360-5mc4elhn9i5na1ogbpmusk3k5tog0g2p.apps.googleusercontent.com', // User App Web ID
+      '569746147360-rrl47k24ibrugtr8eo9u8nak4fu3lriq.apps.googleusercontent.com', // User App iOS ID
+      '569746147360-u0114q12kubma4tlklmvdag3d5nuohdb.apps.googleusercontent.com', // Driver App Web ID
+      '569746147360-8pdhvpbprgeojglih2mtg7o3uvfq4rgv.apps.googleusercontent.com', // Driver App iOS ID
+      '569746147360-t260d2s48opec01s37q5lr26ofhnk8qm.apps.googleusercontent.com'  // Original ID
+    ].filter(id => !!id);
+
+    const ticket = await googleClient.verifyIdToken({
+      idToken,
+      audience: clientIds,
+    });
+    const payload = ticket.getPayload();
+    const { email, name, picture, sub: googleId } = payload;
+
+    if (!email) {
+      return res.status(400).json({ error: 'Google account must have an email' });
+    }
+
+    // 2. Check if user already exists
+    let result = await pool.query(
+      `SELECT id, email, full_name, ${table === 'users' ? 'role,' : ''} is_active FROM ${table} WHERE email = $1`,
+      [email]
+    );
+
+    let account;
+    if (result.rows.length === 0) {
+      // 3. Auto-Register (Signup) if user doesn't exist
+      console.log(`Auto-registering new ${role} via Google:`, email);
+      
+      if (table === 'drivers') {
+        result = await pool.query(
+          `INSERT INTO drivers (email, full_name, status, google_id, profile_pic)
+           VALUES ($1, $2, 'offline', $3, $4)
+           RETURNING id, email, full_name`,
+          [email, name, googleId, picture]
+        );
+      } else {
+        result = await pool.query(
+          `INSERT INTO users (email, full_name, role, google_id, profile_pic)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING id, email, full_name, role`,
+          [email, name, role, googleId, picture]
+        );
+      }
+      account = result.rows[0];
+    } else {
+      // 4. Existing account - check if active
+      account = result.rows[0];
+      if (!account.is_active) {
+        return res.status(401).json({ error: 'Account is inactive' });
+      }
+      
+      // Update Google ID if not already set
+      await pool.query(
+        `UPDATE ${table} SET google_id = $1 WHERE id = $2 AND google_id IS NULL`,
+        [googleId, account.id]
+      );
+    }
+
+    // 5. Generate JWT Token
+    const token = jwt.sign(
+      { 
+        userId: account.id, 
+        email: account.email, 
+        role: table === 'drivers' ? 'driver' : account.role, 
+        accountType: table === 'drivers' ? 'driver' : 'user' 
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+    );
+
+    res.json({
+      message: 'Google login successful',
+      token,
+      user: {
+        id: account.id,
+        email: account.email,
+        fullName: account.full_name,
+        role: table === 'drivers' ? 'driver' : account.role
+      }
+    });
+  } catch (error) {
+    console.error('Google Auth error:', error);
+    res.status(401).json({ error: 'Google authentication failed: ' + error.message });
   }
 });
 
@@ -317,7 +420,7 @@ router.post('/password-reset', [
         await transporter.sendMail({
           from: process.env.RESET_EMAIL_FROM || 'noreply@example.com',
           to: email,
-          subject: 'Password reset – Naomi Logistics',
+          subject: 'Password reset – Naomi Express',
           text: `Use this token in the app to set a new password: ${token}\nOr open: ${appUrl}/reset-password?token=${token}`,
         });
         emailSent = true;

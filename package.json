@@ -1,7 +1,7 @@
 {
   "name": "oprime-logistics-backend",
   "version": "1.0.0",
-  "description": "Naomi Logistics Backend API",
+  "description": "Naomi Express Backend API",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
@@ -9,23 +9,26 @@
     "migrate": "node database/migrate.js",
     "seed": "node database/seed.js"
   },
-  "keywords": ["logistics", "api", "express"],
+  "keywords": [
+    "logistics",
+    "api",
+    "express"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "express": "^4.18.2",
-    "pg": "^8.11.3",
+    "axios": "^1.6.2",
     "bcrypt": "^5.1.1",
-    "jsonwebtoken": "^9.0.2",
-    "dotenv": "^16.3.1",
     "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
     "express-validator": "^7.0.1",
-    "uuid": "^9.0.1",
-    "axios": "^1.6.2"
+    "google-auth-library": "^10.6.2",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.11.3",
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
   }
 }
-
-

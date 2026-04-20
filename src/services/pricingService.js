@@ -73,19 +73,28 @@ async function geocodeAddress(address) {
   }
 
   // Fallback: Nominatim (no API key required — rate limited to 1 req/sec)
-  await sleep(1100);
-  const res = await axios.get(NOMINATIM_BASE, {
-    params: { q: address, format: 'json', limit: 1, addressdetails: 1 },
-    headers: { 'User-Agent': USER_AGENT },
-    timeout: 10000,
-  });
-  if (!res.data || res.data.length === 0) return null;
-  const first = res.data[0];
-  return {
-    lat: parseFloat(first.lat),
-    lon: parseFloat(first.lon),
-    state: first.address?.state || first.address?.province || null,
-  };
+  try {
+    console.log('[PriceCalculation] Attempting Nominatim fallback for:', address);
+    await sleep(1100);
+    const res = await axios.get(NOMINATIM_BASE, {
+      params: { q: address, format: 'json', limit: 1, addressdetails: 1 },
+      headers: { 'User-Agent': USER_AGENT },
+      timeout: 10000,
+    });
+    if (!res.data || res.data.length === 0) {
+      console.warn('[PriceCalculation] Nominatim returned no results for:', address);
+      return null;
+    }
+    const first = res.data[0];
+    return {
+      lat: parseFloat(first.lat),
+      lon: parseFloat(first.lon),
+      state: first.address?.state || first.address?.province || null,
+    };
+  } catch (err) {
+    console.error('[PriceCalculation] Nominatim geocoding failed:', err.message);
+    return null;
+  }
 }
 
 /** Haversine distance in km (last-resort fallback if all APIs fail) */
@@ -158,9 +167,13 @@ async function calculateDistance(pickupAddress, deliveryAddress) {
     }
 
     const road = await getRoadDistanceAndDuration(pickup, delivery);
-    if (road) return { ...road, pickupState: pickup.state, deliveryState: delivery.state };
+    if (road) {
+      console.log('[PriceCalculation] Road distance result:', road);
+      return { ...road, pickupState: pickup.state, deliveryState: delivery.state };
+    }
 
     const fallbackKm = haversineKm(pickup, delivery);
+    console.log('[PriceCalculation] Falling back to Haversine distance:', fallbackKm);
     return { 
       distanceKm: Math.round(fallbackKm * 10) / 10, 
       durationMinutes: null,
@@ -174,7 +187,8 @@ async function calculateDistance(pickupAddress, deliveryAddress) {
       deliveryAddress,
       stack: error.stack
     });
-    return { distanceKm: 10, durationMinutes: null, pickupState: null, deliveryState: null };
+    // Return a very specific number to make it obvious it's a hard fallback
+    return { distanceKm: 10.01, durationMinutes: null, pickupState: null, deliveryState: null };
   }
 }
 
@@ -190,8 +204,16 @@ async function calculatePrice(pickupAddress, deliveryAddress, weight, serviceTyp
     }
 
     const pricingRule = result.rows[0];
+    console.log('[PriceCalculation] Using pricing rule:', {
+      rule_name: pricingRule.rule_name,
+      base_price: pricingRule.base_price,
+      price_per_km: pricingRule.price_per_km,
+      min_price: pricingRule.min_price
+    });
+
     const { distanceKm, pickupState, deliveryState } = await calculateDistance(pickupAddress, deliveryAddress);
     const distance = distanceKm;
+    console.log('[PriceCalculation] Distance calculated:', { distance, pickupState, deliveryState });
 
     let price = 0;
     const breakdown = {};
@@ -259,11 +281,15 @@ async function calculatePrice(pickupAddress, deliveryAddress, weight, serviceTyp
 
     // Constraints
     if (price < parseFloat(pricingRule.min_price)) {
+      console.log(`[PriceCalculation] Price ${price} is below min_price ${pricingRule.min_price}, adjusting.`);
       price = parseFloat(pricingRule.min_price);
     }
     if (pricingRule.max_price && price > parseFloat(pricingRule.max_price)) {
+      console.log(`[PriceCalculation] Price ${price} is above max_price ${pricingRule.max_price}, adjusting.`);
       price = parseFloat(pricingRule.max_price);
     }
+
+    console.log('[PriceCalculation] Final price:', price, 'Breakdown:', breakdown);
 
     return {
       price: Math.round(price * 100) / 100,

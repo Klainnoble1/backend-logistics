@@ -17,7 +17,7 @@ app.use(express.urlencoded({ extended: true }));
 // Root – show API info (so base URL isn’t “Route not found”)
 app.get('/', (req, res) => {
   res.json({
-    name: 'Naomi Logistics API',
+    name: 'Naomi Express API',
     status: 'ok',
     docs: {
       health: '/health',
@@ -50,7 +50,7 @@ app.use('/api/payments', (req, res, next) => {
 
 // Health check
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', message: 'Naomi Logistics API is running' });
+  res.json({ status: 'ok', message: 'Naomi Express API is running' });
 });
 
 // Error handling middleware

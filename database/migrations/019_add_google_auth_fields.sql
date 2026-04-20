@@ -1,0 +1,6 @@
+-- Add Google Auth columns to users and drivers
+ALTER TABLE users ADD COLUMN IF NOT EXISTS google_id VARCHAR(255) UNIQUE;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_pic TEXT;
+
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS google_id VARCHAR(255) UNIQUE;
+ALTER TABLE drivers ADD COLUMN IF NOT EXISTS profile_pic TEXT;

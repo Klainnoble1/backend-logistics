@@ -249,9 +249,11 @@ router.get('/:id', async (req, res) => {
 
     if (req.user.role === 'customer') {
       query = `
-        SELECT p.*, a.rating, a.review_comment, a.delivery_confirmed_at 
+        SELECT p.*, a.rating, a.review_comment, a.delivery_confirmed_at,
+               d.full_name as driver_name, d.phone as driver_phone, d.profile_pic as driver_image
         FROM parcels p
         LEFT JOIN assignments a ON p.id = a.parcel_id
+        LEFT JOIN drivers d ON a.driver_id = d.id
         WHERE p.id = $1 AND p.sender_id = $2
       `;
       params = [id, req.user.id];
@@ -266,9 +268,11 @@ router.get('/:id', async (req, res) => {
       params = [id, req.user.id];
     } else {
       query = `
-        SELECT p.*, a.rating, a.review_comment, a.delivery_confirmed_at 
+        SELECT p.*, a.rating, a.review_comment, a.delivery_confirmed_at,
+               d.full_name as driver_name, d.phone as driver_phone, d.profile_pic as driver_image
         FROM parcels p
         LEFT JOIN assignments a ON p.id = a.parcel_id
+        LEFT JOIN drivers d ON a.driver_id = d.id
         WHERE p.id = $1
       `;
       params = [id];

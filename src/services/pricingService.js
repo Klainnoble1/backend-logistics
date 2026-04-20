@@ -48,7 +48,7 @@ function extractStateFromGoogleComponents(addressComponents) {
 async function geocodeAddress(address) {
   const googleKey = process.env.GOOGLE_MAPS_API_KEY;
 
-  if (googleKey) {
+  if (googleKey && googleKey.trim()) {
     try {
       const res = await axios.get(GOOGLE_GEOCODING_BASE, {
         params: {
@@ -66,10 +66,15 @@ async function geocodeAddress(address) {
         return { lat: parseFloat(lat), lon: parseFloat(lng), state };
       }
 
-      console.warn('Google Geocoding returned no results for:', address, '| Status:', res.data?.status);
+      console.warn(`[PriceCalculation] Google Geocoding returned status: ${res.data?.status} for address: ${address}`);
+      if (res.data?.error_message) {
+        console.warn(`[PriceCalculation] Google Error: ${res.data.error_message}`);
+      }
     } catch (err) {
-      console.warn('Google Geocoding failed, falling back to Nominatim:', err.message);
+      console.warn('[PriceCalculation] Google Geocoding request failed:', err.message);
     }
+  } else {
+    console.warn('[PriceCalculation] GOOGLE_MAPS_API_KEY is missing in environment. Using Nominatim fallback.');
   }
 
   // Fallback: Nominatim (no API key required — rate limited to 1 req/sec)
@@ -92,7 +97,7 @@ async function geocodeAddress(address) {
       state: first.address?.state || first.address?.province || null,
     };
   } catch (err) {
-    console.error('[PriceCalculation] Nominatim geocoding failed:', err.message);
+    console.error(`[PriceCalculation] Nominatim geocoding failed (403 usually means blocked IP): ${err.message}`);
     return null;
   }
 }
@@ -116,7 +121,7 @@ function haversineKm(p1, p2) {
 async function getRoadDistanceAndDuration(pickup, delivery) {
   const googleKey = process.env.GOOGLE_MAPS_API_KEY;
 
-  if (googleKey) {
+  if (googleKey && googleKey.trim()) {
     try {
       const res = await axios.get(GOOGLE_DISTANCE_MATRIX_BASE, {
         params: {
@@ -129,6 +134,11 @@ async function getRoadDistanceAndDuration(pickup, delivery) {
         timeout: 10000,
       });
 
+      if (res.data?.status === 'REQUEST_DENIED') {
+        console.warn(`[PriceCalculation] Google Distance Matrix Request Denied: ${res.data.error_message || 'Check API Key restrictions'}`);
+        return null;
+      }
+
       const element = res.data?.rows?.[0]?.elements?.[0];
       if (element?.status === 'OK') {
         const distanceKm = (element.distance?.value || 0) / 1000;
@@ -139,10 +149,12 @@ async function getRoadDistanceAndDuration(pickup, delivery) {
         };
       }
 
-      console.warn('Google Distance Matrix returned status:', element?.status);
+      console.warn(`[PriceCalculation] Google Distance Matrix returned element status: ${element?.status}`);
     } catch (err) {
-      console.warn('Google Distance Matrix failed, using haversine fallback:', err.message);
+      console.warn('[PriceCalculation] Google Distance Matrix request failed:', err.message);
     }
+  } else {
+    console.warn('[PriceCalculation] GOOGLE_MAPS_API_KEY is missing. Skipping Distance Matrix.');
   }
 
   return null;

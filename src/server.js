@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const { clerkMiddleware } = require('@clerk/express');
 require('dotenv').config();
 
 const app = express();
@@ -7,6 +8,7 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
+app.use(clerkMiddleware());
 app.use(express.json({
   verify: (req, res, buf) => {
     req.rawBody = buf.toString();

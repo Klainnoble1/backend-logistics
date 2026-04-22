@@ -18,8 +18,8 @@ async function createOyoOrder() {
     console.log(`Using user: ${userEmail} (ID: ${userId})`);
 
     // 1. Define Oyo State addresses (Ibadan)
-    const pickupAddress = 'Bodija Market, Ibadan, Oyo State';
-    const deliveryAddress = 'Oja-ba Market, Ibadan, Oyo State';
+    const pickupAddress = 'Ibadan Airport, Ibadan, Oyo State';
+    const deliveryAddress = 'Oyo State Government House, Agodi, Ibadan';
     const weight = 2.0;
     const serviceType = 'standard';
     const insurance = false;

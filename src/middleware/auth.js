@@ -1,45 +1,58 @@
-const jwt = require('jsonwebtoken');
+const { getAuth, clerkClient } = require('@clerk/express');
 const pool = require('../config/database');
 
 const authenticate = async (req, res, next) => {
   try {
-    const token = req.headers.authorization?.split(' ')[1];
+    const { userId } = getAuth(req);
 
-    if (!token) {
+    if (!userId) {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    
-    // Choose table based on accountType in token (defaults to 'users' for old tokens)
-    const table = decoded.accountType === 'driver' ? 'drivers' : 'users';
-    
-    // Verify account still exists and is active
-    const result = await pool.query(
-      `SELECT id, email, ${table === 'users' ? 'role,' : ''} is_active FROM ${table} WHERE id = $1`,
-      [decoded.userId]
+    // 1. Get user details from Clerk
+    const clerkUser = await clerkClient.users.getUser(userId);
+    const email = clerkUser.emailAddresses[0]?.emailAddress;
+    const fullName = `${clerkUser.firstName || ''} ${clerkUser.lastName || ''}`.trim();
+    const role = clerkUser.publicMetadata.role || 'customer'; // Default to customer
+    const table = role === 'driver' ? 'drivers' : 'users';
+
+    // 2. Sync with local database
+    let result = await pool.query(
+      `SELECT id, email, ${role !== 'driver' ? 'role,' : ''} is_active FROM ${table} WHERE id = $1`,
+      [userId]
     );
 
-    if (result.rows.length === 0 || !result.rows[0].is_active) {
-      return res.status(401).json({ error: 'Invalid or inactive account' });
+    if (result.rows.length === 0) {
+      // Create local record if missing
+      if (role === 'driver') {
+        result = await pool.query(
+          'INSERT INTO drivers (id, email, full_name, is_active) VALUES ($1, $2, $3, true) RETURNING id, email, is_active',
+          [userId, email, fullName]
+        );
+      } else {
+        result = await pool.query(
+          'INSERT INTO users (id, email, full_name, role, is_active) VALUES ($1, $2, $3, $4, true) RETURNING id, email, role, is_active',
+          [userId, email, fullName, role]
+        );
+      }
+    }
+
+    const localUser = result.rows[0];
+    if (!localUser.is_active) {
+      return res.status(401).json({ error: 'Account is inactive' });
     }
 
     req.user = {
-      id: result.rows[0].id,
-      email: result.rows[0].email,
-      role: table === 'users' ? result.rows[0].role : 'driver',
-      accountType: table === 'users' ? 'user' : 'driver'
+      id: localUser.id,
+      email: localUser.email,
+      role: role === 'driver' ? 'driver' : localUser.role,
+      accountType: role === 'driver' ? 'driver' : 'user'
     };
 
     next();
   } catch (error) {
-    if (error.name === 'JsonWebTokenError') {
-      return res.status(401).json({ error: 'Invalid token' });
-    }
-    if (error.name === 'TokenExpiredError') {
-      return res.status(401).json({ error: 'Token expired' });
-    }
-    res.status(500).json({ error: 'Authentication error' });
+    console.error('Clerk Auth Error:', error);
+    res.status(401).json({ error: 'Authentication failed', message: error.message });
   }
 };
 

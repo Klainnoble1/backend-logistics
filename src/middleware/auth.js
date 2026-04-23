@@ -1,6 +1,28 @@
 const { getAuth, clerkClient } = require('@clerk/express');
 const pool = require('../config/database');
 
+const CLERK_MANAGED_PASSWORD = 'clerk_managed';
+let clerkColumnsReady = false;
+
+const ensureClerkColumns = async () => {
+  if (clerkColumnsReady) return;
+
+  await pool.query(`
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS clerk_id VARCHAR(255);
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS profile_pic TEXT;
+    ALTER TABLE drivers ADD COLUMN IF NOT EXISTS clerk_id VARCHAR(255);
+    ALTER TABLE drivers ADD COLUMN IF NOT EXISTS profile_pic TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_clerk_id
+      ON users(clerk_id)
+      WHERE clerk_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_drivers_clerk_id
+      ON drivers(clerk_id)
+      WHERE clerk_id IS NOT NULL;
+  `);
+
+  clerkColumnsReady = true;
+};
+
 const authenticate = async (req, res, next) => {
   try {
     const { userId } = getAuth(req);
@@ -11,28 +33,62 @@ const authenticate = async (req, res, next) => {
 
     // 1. Get user details from Clerk
     const clerkUser = await clerkClient.users.getUser(userId);
-    const email = clerkUser.emailAddresses[0]?.emailAddress;
-    const fullName = `${clerkUser.firstName || ''} ${clerkUser.lastName || ''}`.trim();
-    const role = clerkUser.publicMetadata.role || 'customer'; // Default to customer
+    const email = clerkUser.primaryEmailAddress?.emailAddress || clerkUser.emailAddresses[0]?.emailAddress;
+    const fullName =
+      `${clerkUser.firstName || ''} ${clerkUser.lastName || ''}`.trim() ||
+      email ||
+      'Clerk User';
+    const requestedRole = req.get('x-app-role');
+    const role =
+      clerkUser.publicMetadata.role ||
+      (requestedRole === 'driver' ? 'driver' : 'customer');
     const table = role === 'driver' ? 'drivers' : 'users';
+    const columns = `id, email, phone, full_name, ${role !== 'driver' ? 'role,' : ''} is_active`;
 
-    // 2. Sync with local database
+    await ensureClerkColumns();
+
+    // 2. Sync Clerk identity with local UUID account.
     let result = await pool.query(
-      `SELECT id, email, ${role !== 'driver' ? 'role,' : ''} is_active FROM ${table} WHERE id = $1`,
+      `SELECT ${columns} FROM ${table} WHERE clerk_id = $1`,
       [userId]
     );
+
+    if (result.rows.length === 0 && email) {
+      result = await pool.query(
+        `SELECT ${columns} FROM ${table} WHERE email = $1`,
+        [email]
+      );
+
+      if (result.rows.length > 0) {
+        const existing = result.rows[0];
+        result = await pool.query(
+          `UPDATE ${table}
+           SET clerk_id = $1,
+               full_name = COALESCE(NULLIF($2, ''), full_name),
+               profile_pic = COALESCE($3, profile_pic),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $4
+           RETURNING ${columns}`,
+          [userId, fullName, clerkUser.imageUrl || null, existing.id]
+        );
+      }
+    }
 
     if (result.rows.length === 0) {
       // Create local record if missing
       if (role === 'driver') {
         result = await pool.query(
-          'INSERT INTO drivers (id, email, full_name, is_active) VALUES ($1, $2, $3, true) RETURNING id, email, is_active',
-          [userId, email, fullName]
+          `INSERT INTO drivers (email, full_name, password_hash, is_active, clerk_id, profile_pic, status)
+           VALUES ($1, $2, $3, true, $4, $5, 'offline')
+           RETURNING ${columns}`,
+          [email, fullName, CLERK_MANAGED_PASSWORD, userId, clerkUser.imageUrl || null]
         );
       } else {
         result = await pool.query(
-          'INSERT INTO users (id, email, full_name, role, is_active) VALUES ($1, $2, $3, $4, true) RETURNING id, email, role, is_active',
-          [userId, email, fullName, role]
+          `INSERT INTO users (email, full_name, password_hash, role, is_active, clerk_id, profile_pic)
+           VALUES ($1, $2, $3, $4, true, $5, $6)
+           RETURNING ${columns}`,
+          [email, fullName, CLERK_MANAGED_PASSWORD, role, userId, clerkUser.imageUrl || null]
         );
       }
     }
@@ -44,6 +100,7 @@ const authenticate = async (req, res, next) => {
 
     req.user = {
       id: localUser.id,
+      clerkId: userId,
       email: localUser.email,
       role: role === 'driver' ? 'driver' : localUser.role,
       accountType: role === 'driver' ? 'driver' : 'user'

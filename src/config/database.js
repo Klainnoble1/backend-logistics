@@ -2,6 +2,10 @@ const { Pool } = require('pg');
 require('dotenv').config();
 
 let poolConfig;
+const isServerless = Boolean(process.env.VERCEL);
+const maxConnections = Number(process.env.DB_POOL_MAX || (isServerless ? 1 : 3));
+const idleTimeoutMillis = Number(process.env.DB_IDLE_TIMEOUT_MS || (isServerless ? 5000 : 30000));
+const connectionTimeoutMillis = Number(process.env.DB_CONNECTION_TIMEOUT_MS || 10000);
 
 if (process.env.DATABASE_URL) {
   try {
@@ -19,9 +23,10 @@ if (process.env.DATABASE_URL) {
       ssl: { 
         rejectUnauthorized: false 
       },
-      max: 5,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 30000,
+      max: maxConnections,
+      idleTimeoutMillis,
+      connectionTimeoutMillis,
+      allowExitOnIdle: isServerless,
     };
   } catch (e) {
     console.warn('Invalid DATABASE_URL:', e.message);
@@ -37,9 +42,10 @@ if (!poolConfig) {
     ssl: { 
       rejectUnauthorized: false 
     },
-    max: 5,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 30000,
+    max: maxConnections,
+    idleTimeoutMillis,
+    connectionTimeoutMillis,
+    allowExitOnIdle: isServerless,
   };
 }
 
@@ -49,10 +55,11 @@ pool.on('error', (err) => {
   console.error('Unexpected error on idle client', err);
 });
 
-pool.query('SELECT NOW()', (err, res) => {
-  if (err) console.error('Database connection error:', err);
-  else if (res) console.log('Database connected at', res.rows[0].now);
-});
+if (process.env.DB_LOG_CONNECTION === 'true') {
+  pool.query('SELECT NOW()', (err, res) => {
+    if (err) console.error('Database connection error:', err);
+    else if (res) console.log('Database connected at', res.rows[0].now);
+  });
+}
 
 module.exports = pool;
-

@@ -1,12 +1,16 @@
 const express = require('express');
 const cors = require('cors');
 const { clerkMiddleware } = require('@clerk/express');
+const helmet = require('helmet');
+const compression = require('compression');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
+app.use(helmet());
+app.use(compression());
 app.use(cors());
 app.use(clerkMiddleware());
 app.use(express.json({

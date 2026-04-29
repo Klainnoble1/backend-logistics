@@ -195,10 +195,7 @@ router.get('/', async (req, res) => {
     if (req.user.role === 'customer') {
       // Customers see only their parcels
       query = `
-        SELECT p.*, 
-               (SELECT status FROM parcel_status_history 
-                WHERE parcel_id = p.id 
-                ORDER BY created_at DESC LIMIT 1) as latest_status
+        SELECT p.*
         FROM parcels p
         WHERE p.sender_id = $1
         ORDER BY p.created_at DESC
@@ -207,10 +204,7 @@ router.get('/', async (req, res) => {
     } else if (req.user.role === 'driver') {
       // Drivers see assigned parcels
       query = `
-        SELECT p.*, a.status as assignment_status,
-               (SELECT status FROM parcel_status_history 
-                WHERE parcel_id = p.id 
-                ORDER BY created_at DESC LIMIT 1) as latest_status
+        SELECT p.*, a.status as assignment_status
         FROM parcels p
         INNER JOIN assignments a ON p.id = a.parcel_id
         INNER JOIN drivers d ON a.driver_id = d.id
@@ -221,10 +215,7 @@ router.get('/', async (req, res) => {
     } else {
       // Admin sees all parcels
       query = `
-        SELECT p.*, 
-               (SELECT status FROM parcel_status_history 
-                WHERE parcel_id = p.id 
-                ORDER BY created_at DESC LIMIT 1) as latest_status
+        SELECT p.*
         FROM parcels p
         ORDER BY p.created_at DESC
       `;

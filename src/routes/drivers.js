@@ -657,6 +657,74 @@ router.post('/:driverId/assign', [
   }
 });
 
+// Update driver status (admin only)
+router.put('/:driverId/status', [
+  body('status').isIn(['available', 'busy', 'offline'])
+], authorize('admin'), async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { driverId } = req.params;
+    const { status } = req.body;
+
+    const result = await pool.query(
+      `UPDATE drivers 
+       SET status = $1, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $2
+       RETURNING *`,
+      [status, driverId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Driver not found' });
+    }
+
+    res.json({ message: 'Driver status updated', driver: result.rows[0] });
+  } catch (error) {
+    console.error('Update driver status admin error:', error);
+    res.status(500).json({ error: 'Failed to update driver status' });
+  }
+});
+
+// Ban/Unban driver (admin only)
+router.put('/:driverId/ban', [
+  body('isBanned').isBoolean()
+], authorize('admin'), async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { driverId } = req.params;
+    const { isBanned } = req.body;
+
+    // If banned, also set status to offline and verification_status to banned
+    const vStatus = isBanned ? 'banned' : 'pending';
+    const dStatus = isBanned ? 'offline' : 'offline';
+
+    const result = await pool.query(
+      `UPDATE drivers 
+       SET is_banned = $1, status = $2, verification_status = $3, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $4
+       RETURNING *`,
+      [isBanned, dStatus, vStatus, driverId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Driver not found' });
+    }
+
+    res.json({ message: isBanned ? 'Driver banned' : 'Driver unbanned', driver: result.rows[0] });
+  } catch (error) {
+    console.error('Ban driver error:', error);
+    res.status(500).json({ error: 'Failed to update driver ban status' });
+  }
+});
+
 // Update driver profile (driver only)
 router.put('/me/profile', [
   body('licenseNumber').optional().trim(),

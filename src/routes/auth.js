@@ -4,8 +4,88 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
 const { authenticate } = require('../middleware/auth');
+const multer = require('multer');
+const { uploadBuffer } = require('../utils/cloudinary');
+
+const upload = multer({ storage: multer.memoryStorage() });
 
 const router = express.Router();
+
+/**
+ * @access  Public
+ */
+router.post('/register', upload.fields([
+  { name: 'profilePicture', maxCount: 1 },
+  { name: 'licenseImage', maxCount: 1 },
+  { name: 'motorcycleReg', maxCount: 1 }
+]), [
+  body('email').isEmail().normalizeEmail(),
+  body('password').isLength({ min: 6 }),
+  body('fullName').notEmpty(),
+  body('phone').notEmpty(),
+  body('role').isIn(['user', 'driver']).optional()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    const { email, password, fullName, phone, role } = req.body;
+    const isDriver = role === 'driver';
+    const table = isDriver ? 'drivers' : 'users';
+
+    // Check if email exists
+    const existing = await pool.query(`SELECT id FROM ${table} WHERE email = $1`, [email]);
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ error: 'Email already exists' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    let profilePictureUrl = null;
+    let licenseImageUrl = null;
+    let motorcycleRegUrl = null;
+
+    if (isDriver) {
+      if (req.files) {
+        if (req.files.profilePicture) {
+          profilePictureUrl = await uploadBuffer(req.files.profilePicture[0].buffer, 'drivers/profiles');
+        }
+        if (req.files.licenseImage) {
+          licenseImageUrl = await uploadBuffer(req.files.licenseImage[0].buffer, 'drivers/licenses');
+        }
+        if (req.files.motorcycleReg) {
+          motorcycleRegUrl = await uploadBuffer(req.files.motorcycleReg[0].buffer, 'drivers/registrations');
+        }
+      }
+
+      // If we received documents, mark as verified automatically
+      const hasDocs = profilePictureUrl && licenseImageUrl && motorcycleRegUrl;
+      const verificationStatus = hasDocs ? 'verified' : 'pending';
+      const driverStatus = 'offline';
+
+      const result = await pool.query(
+        `INSERT INTO drivers (
+          email, password_hash, full_name, phone, 
+          profile_picture_url, license_image_url, motorcycle_reg_url,
+          verification_status, status, is_active
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true) RETURNING id`,
+        [email, passwordHash, fullName, phone, profilePictureUrl, licenseImageUrl, motorcycleRegUrl, verificationStatus, driverStatus]
+      );
+
+      res.status(201).json({ message: 'Driver registered successfully', id: result.rows[0].id });
+    } else {
+      const result = await pool.query(
+        `INSERT INTO users (email, password_hash, full_name, phone, role, is_active) 
+         VALUES ($1, $2, $3, $4, 'user', true) RETURNING id`,
+        [email, passwordHash, fullName, phone]
+      );
+      res.status(201).json({ message: 'User registered successfully', id: result.rows[0].id });
+    }
+  } catch (error) {
+    console.error('Registration error:', error);
+    res.status(500).json({ error: 'Failed to register' });
+  }
+});
 
 /**
  * @route   POST /api/auth/login
@@ -85,7 +165,7 @@ router.get('/me', authenticate, async (req, res) => {
   try {
     const table = req.user.accountType === 'driver' ? 'drivers' : 'users';
     const result = await pool.query(
-      `SELECT id, email, phone, full_name, ${table === 'users' ? 'role,' : ''} created_at FROM ${table} WHERE id = $1`,
+      `SELECT id, email, phone, full_name, ${table === 'users' ? 'role,' : 'verification_status,'} created_at FROM ${table} WHERE id = $1`,
       [req.user.id]
     );
 
@@ -101,6 +181,7 @@ router.get('/me', authenticate, async (req, res) => {
         fullName: dbUser.full_name,
         phone: dbUser.phone,
         role: req.user.accountType === 'driver' ? 'driver' : dbUser.role,
+        verificationStatus: req.user.accountType === 'driver' ? dbUser.verification_status : undefined,
         createdAt: dbUser.created_at
       }
     });

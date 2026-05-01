@@ -5,6 +5,10 @@ const { authenticate, authorize } = require('../middleware/auth');
 const { notifyDriverAssignment, createNotification } = require('../services/notificationService');
 const { hasCompletedPaymentForParcel } = require('../services/paymentService');
 const { normalizeState } = require('../services/pricingService');
+const multer = require('multer');
+const { uploadBuffer } = require('../utils/cloudinary');
+
+const upload = multer({ storage: multer.memoryStorage() });
 
 const router = express.Router();
 
@@ -51,7 +55,9 @@ router.get('/me', authorize('driver'), async (req, res) => {
       `SELECT id, status, state, license_number, vehicle_type, vehicle_plate,
               wallet_balance, completed_orders, average_rating,
               bank_name, account_number, account_name,
-              full_name, email, phone
+              full_name, email, phone,
+              verification_status, verified_phone, profile_picture_url,
+              license_image_url, motorcycle_reg_url, rejection_reason
        FROM drivers
        WHERE id = $1`,
       [req.user.id]
@@ -77,6 +83,12 @@ router.get('/me', authorize('driver'), async (req, res) => {
         fullName: row.full_name,
         email: row.email,
         phone: row.phone,
+        verificationStatus: row.verification_status,
+        verifiedPhone: row.verified_phone,
+        profilePictureUrl: row.profile_picture_url,
+        licenseImageUrl: row.license_image_url,
+        motorcycleRegUrl: row.motorcycle_reg_url,
+        rejectionReason: row.rejection_reason,
       },
     });
   } catch (error) {
@@ -427,6 +439,23 @@ router.put('/me/status', [
 
     const { status } = req.body;
 
+    // If driver wants to go online ('available'), check verification status
+    if (status === 'available') {
+      const driverRes = await pool.query(
+        'SELECT verification_status FROM drivers WHERE id = $1',
+        [req.user.id]
+      );
+      
+      const vStatus = driverRes.rows[0]?.verification_status;
+      if (vStatus !== 'verified') {
+        return res.status(403).json({ 
+          error: 'Verification required', 
+          message: 'You must be verified before you can go online.',
+          verificationStatus: vStatus
+        });
+      }
+    }
+
     const result = await pool.query(
       `UPDATE drivers 
        SET status = $1, updated_at = CURRENT_TIMESTAMP
@@ -446,6 +475,56 @@ router.put('/me/status', [
   } catch (error) {
     console.error('Update driver status error:', error);
     res.status(500).json({ error: 'Failed to update driver status' });
+  }
+});
+
+// Submit verification documents (driver only)
+router.post('/me/verification', upload.fields([
+  { name: 'profilePicture', maxCount: 1 },
+  { name: 'licenseImage', maxCount: 1 },
+  { name: 'motorcycleReg', maxCount: 1 },
+]), authorize('driver'), async (req, res) => {
+  try {
+    const { phone } = req.body;
+    const files = req.files;
+
+    if (!phone) {
+      return res.status(400).json({ error: 'Phone number is required' });
+    }
+
+    if (!files || !files.profilePicture || !files.licenseImage || !files.motorcycleReg) {
+      return res.status(400).json({ error: 'All 3 documents (profile, license, registration) are required' });
+    }
+
+    // Upload to Cloudinary
+    console.log('Uploading verification documents to Cloudinary...');
+    const [profileRes, licenseRes, regRes] = await Promise.all([
+      uploadBuffer(files.profilePicture[0].buffer, `drivers/${req.user.id}/profile`),
+      uploadBuffer(files.licenseImage[0].buffer, `drivers/${req.user.id}/license`),
+      uploadBuffer(files.motorcycleReg[0].buffer, `drivers/${req.user.id}/registration`),
+    ]);
+
+    // Update driver profile
+    const result = await pool.query(
+      `UPDATE drivers 
+       SET verification_status = 'pending',
+           verified_phone = $1,
+           profile_picture_url = $2,
+           license_image_url = $3,
+           motorcycle_reg_url = $4,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $5
+       RETURNING *`,
+      [phone, profileRes.secure_url, licenseRes.secure_url, regRes.secure_url, req.user.id]
+    );
+
+    res.json({
+      message: 'Verification submitted successfully. It is now pending review.',
+      driver: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Submit verification error:', error);
+    res.status(500).json({ error: 'Failed to submit verification: ' + error.message });
   }
 });
 

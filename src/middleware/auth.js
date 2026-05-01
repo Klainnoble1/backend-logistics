@@ -1,10 +1,27 @@
 const { getAuth, clerkClient } = require('@clerk/express');
+const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
 
 const CLERK_MANAGED_PASSWORD = 'clerk_managed';
 
 const authenticate = async (req, res, next) => {
   try {
+    // 1. Try Custom JWT (for local admin/users)
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1];
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        if (decoded) {
+          req.user = decoded;
+          return next();
+        }
+      } catch (err) {
+        // Not a valid custom JWT, continue to Clerk
+      }
+    }
+
+    // 2. Try Clerk
     const { userId } = getAuth(req);
 
     if (!userId) {

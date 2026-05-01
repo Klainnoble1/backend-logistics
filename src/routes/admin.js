@@ -688,4 +688,71 @@ router.delete('/interstate-pricing/:id', async (req, res) => {
   }
 });
 
+// Get drivers pending verification or with documents
+router.get('/drivers/verification', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, full_name, email, phone, verification_status, profile_picture_url, 
+              license_image_url, motorcycle_reg_url, rejection_reason, created_at, is_banned
+       FROM drivers
+       WHERE verification_status != 'unverified' OR is_banned = true
+       ORDER BY 
+         CASE 
+           WHEN is_banned = true THEN 3
+           WHEN verification_status = 'pending' THEN 0 
+           WHEN verification_status = 'rejected' THEN 2
+           WHEN verification_status = 'verified' THEN 1
+           ELSE 4 
+         END,
+         created_at DESC`
+    );
+    res.json({ drivers: result.rows });
+  } catch (error) {
+    console.error('Get driver verifications error:', error);
+    res.status(500).json({ error: 'Failed to get driver verifications' });
+  }
+});
+
+// Process driver verification actions
+router.post('/drivers/:id/verification-action', [
+  body('action').isIn(['approve', 'reject', 'ban', 'unban']),
+  body('reason').optional().trim()
+], async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { action, reason } = req.body;
+
+    let query = '';
+    let params = [id];
+
+    if (action === 'approve') {
+      query = `UPDATE drivers SET verification_status = 'verified', rejection_reason = NULL, is_banned = false WHERE id = $1 RETURNING *`;
+    } else if (action === 'reject') {
+      query = `UPDATE drivers SET verification_status = 'rejected', rejection_reason = $2, is_banned = false WHERE id = $1 RETURNING *`;
+      params.push(reason || 'Documents were not clear or invalid.');
+    } else if (action === 'ban') {
+      query = `UPDATE drivers SET is_banned = true, status = 'offline' WHERE id = $1 RETURNING *`;
+    } else if (action === 'unban') {
+      query = `UPDATE drivers SET is_banned = false WHERE id = $1 RETURNING *`;
+    }
+
+    const result = await pool.query(query, params);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Driver not found' });
+    }
+
+    // Audit log
+    await logAudit(req.user.id, `DRIVER_${action.toUpperCase()}`, 'driver', id, { action, reason }, req.ip);
+
+    res.json({
+      message: `Driver action ${action} completed successfully`,
+      driver: result.rows[0]
+    });
+  } catch (error) {
+    console.error('Driver verification action error:', error);
+    res.status(500).json({ error: 'Failed to process driver action' });
+  }
+});
+
 module.exports = router;

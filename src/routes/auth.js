@@ -1,9 +1,80 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 const pool = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
+
+/**
+ * @route   POST /api/auth/login
+ * @desc    Login with email and password
+ * @access  Public
+ */
+router.post('/login', [
+  body('email').isEmail().normalizeEmail(),
+  body('password').notEmpty()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    const { email, password } = req.body;
+    
+    // Check in users table
+    const userRes = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    let user = userRes.rows[0];
+    let accountType = 'user';
+
+    // If not in users, check in drivers
+    if (!user) {
+      const driverRes = await pool.query('SELECT * FROM drivers WHERE email = $1', [email]);
+      user = driverRes.rows[0];
+      accountType = 'driver';
+    }
+
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    if (!user.is_active) {
+      return res.status(401).json({ error: 'Account is inactive' });
+    }
+
+    // Verify password (bcrypt compare)
+    const valid = await bcrypt.compare(password, user.password_hash);
+    if (!valid) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    // Generate JWT
+    const token = jwt.sign(
+      { 
+        id: user.id, 
+        email: user.email, 
+        role: user.role || 'driver',
+        accountType: user.role === 'admin' ? 'admin' : accountType
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+
+    res.json({
+      message: 'Login successful',
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        fullName: user.full_name,
+        role: user.role || 'driver'
+      }
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 /**
  * @route   GET /api/auth/me

@@ -30,6 +30,7 @@ app.get('/', (req, res) => {
       auth: '/api/auth (login, register, me)',
       parcels: '/api/parcels',
       drivers: '/api/drivers',
+      partners: '/api/partners',
       admin: '/api/admin',
       payments: '/api/payments'
     }
@@ -40,6 +41,7 @@ app.get('/', (req, res) => {
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/parcels', require('./routes/parcels'));
 app.use('/api/drivers', require('./routes/drivers'));
+app.use('/api/partners', require('./routes/partners'));
 app.use('/api/admin', require('./routes/admin'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/addresses', require('./routes/addresses'));

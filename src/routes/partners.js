@@ -1,0 +1,397 @@
+const express = require('express');
+const { body, validationResult } = require('express-validator');
+const pool = require('../config/database');
+const { authenticate, authorize } = require('../middleware/auth');
+
+const router = express.Router();
+
+router.use(authenticate);
+
+const mapPartner = (row) => ({
+  id: row.id,
+  email: row.email,
+  phone: row.phone,
+  fullName: row.full_name,
+  businessName: row.business_name,
+  commissionPercentage: parseFloat(row.commission_percentage || 0),
+  walletBalance: parseFloat(row.wallet_balance || 0),
+  totalOrders: row.total_orders || 0,
+  completedOrders: row.completed_orders || 0,
+  bankName: row.bank_name,
+  accountNumber: row.account_number,
+  accountName: row.account_name,
+  isActive: row.is_active,
+  createdAt: row.created_at,
+});
+
+const mapOrder = (row) => ({
+  id: row.id,
+  trackingId: row.tracking_id,
+  recipientName: row.recipient_name,
+  recipientPhone: row.recipient_phone,
+  pickupAddress: row.pickup_address,
+  deliveryAddress: row.delivery_address,
+  parcelType: row.parcel_type,
+  weight: parseFloat(row.weight || 0),
+  serviceType: row.service_type,
+  status: row.status,
+  price: parseFloat(row.price || 0),
+  commissionPercentage: parseFloat(row.partner_commission_percentage || 0),
+  commissionAmount: parseFloat(row.partner_commission_amount || 0),
+  commissionCreditedAt: row.partner_commission_credited_at,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+router.get('/me', authorize('partner'), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM partners WHERE id = $1`,
+      [req.user.id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Partner profile not found' });
+    }
+
+    const ordersResult = await pool.query(
+      `SELECT COUNT(*)::int AS total_orders,
+              COUNT(*) FILTER (WHERE status = 'delivered')::int AS completed_orders,
+              COALESCE(SUM(partner_commission_amount) FILTER (WHERE partner_commission_credited_at IS NOT NULL), 0) AS credited_total
+       FROM parcels
+       WHERE partner_id = $1`,
+      [req.user.id]
+    );
+
+    res.json({
+      partner: {
+        ...mapPartner(result.rows[0]),
+        totalOrders: ordersResult.rows[0]?.total_orders || 0,
+        completedOrders: ordersResult.rows[0]?.completed_orders || 0,
+        creditedTotal: parseFloat(ordersResult.rows[0]?.credited_total || 0),
+      },
+    });
+  } catch (error) {
+    console.error('Get partner profile error:', error);
+    res.status(500).json({ error: 'Failed to get partner profile' });
+  }
+});
+
+router.get('/me/orders', authorize('partner'), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM parcels
+       WHERE partner_id = $1
+       ORDER BY created_at DESC
+       LIMIT 100`,
+      [req.user.id]
+    );
+    res.json({ orders: result.rows.map(mapOrder) });
+  } catch (error) {
+    console.error('Get partner orders error:', error);
+    res.status(500).json({ error: 'Failed to get partner orders' });
+  }
+});
+
+router.put('/me/bank', [
+  body('bankName').trim().notEmpty(),
+  body('accountNumber').trim().isLength({ min: 10, max: 10 }).isNumeric(),
+  body('accountName').trim().notEmpty(),
+], authorize('partner'), async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { bankName, accountNumber, accountName } = req.body;
+    const result = await pool.query(
+      `UPDATE partners
+       SET bank_name = $1, account_number = $2, account_name = $3, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $4
+       RETURNING bank_name, account_number, account_name`,
+      [bankName, accountNumber, accountName, req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Partner profile not found' });
+    }
+
+    const row = result.rows[0];
+    res.json({
+      message: 'Bank details saved successfully',
+      bankDetails: {
+        bankName: row.bank_name,
+        accountNumber: row.account_number,
+        accountName: row.account_name,
+      },
+    });
+  } catch (error) {
+    console.error('Save partner bank error:', error);
+    res.status(500).json({ error: 'Failed to save bank details' });
+  }
+});
+
+router.post('/me/withdraw', [
+  body('amount').isFloat({ min: 1000, max: 2000000 }),
+], authorize('partner'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const amount = parseFloat(req.body.amount);
+    await client.query('BEGIN');
+
+    const partnerResult = await client.query(
+      `SELECT id, wallet_balance, bank_name, account_number, account_name, full_name, business_name
+       FROM partners
+       WHERE id = $1
+       FOR UPDATE`,
+      [req.user.id]
+    );
+
+    if (partnerResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Partner profile not found' });
+    }
+
+    const partner = partnerResult.rows[0];
+    if (!partner.bank_name || !partner.account_number || !partner.account_name) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Please add your bank details before requesting a payout' });
+    }
+
+    const currentBalance = parseFloat(partner.wallet_balance || 0);
+    if (amount > currentBalance) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: `Insufficient balance. Your current balance is ₦${currentBalance.toFixed(2)}` });
+    }
+
+    await client.query(
+      `UPDATE partners SET wallet_balance = wallet_balance - $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+      [amount, partner.id]
+    );
+
+    const withdrawalResult = await client.query(
+      `INSERT INTO partner_withdrawals (partner_id, amount, status, bank_name, account_number, account_name)
+       VALUES ($1, $2, 'pending', $3, $4, $5)
+       RETURNING *`,
+      [partner.id, amount, partner.bank_name, partner.account_number, partner.account_name]
+    );
+
+    const adminResult = await client.query(`SELECT id FROM users WHERE role = 'admin'`);
+    const partnerName = partner.business_name || partner.full_name;
+    for (const admin of adminResult.rows) {
+      await client.query(
+        `INSERT INTO notifications (user_id, parcel_id, type, title, message)
+         VALUES ($1, NULL, 'partner_payout_request', $2, $3)`,
+        [
+          admin.id,
+          'Partner Payout Request',
+          `Partner ${partnerName} requested a payout of ₦${amount.toLocaleString('en-NG')}.`,
+        ]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    const withdrawal = withdrawalResult.rows[0];
+    res.status(201).json({
+      message: 'Payout request submitted successfully.',
+      withdrawal: {
+        id: withdrawal.id,
+        amount: parseFloat(withdrawal.amount),
+        status: withdrawal.status,
+        bankName: withdrawal.bank_name,
+        accountNumber: withdrawal.account_number,
+        accountName: withdrawal.account_name,
+        createdAt: withdrawal.created_at,
+      },
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Partner payout request error:', error);
+    res.status(500).json({ error: 'Failed to process payout request' });
+  } finally {
+    client.release();
+  }
+});
+
+router.get('/me/withdrawals', authorize('partner'), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM partner_withdrawals WHERE partner_id = $1 ORDER BY created_at DESC LIMIT 50`,
+      [req.user.id]
+    );
+    res.json({
+      withdrawals: result.rows.map((w) => ({
+        id: w.id,
+        amount: parseFloat(w.amount),
+        status: w.status,
+        bankName: w.bank_name,
+        accountNumber: w.account_number,
+        accountName: w.account_name,
+        notes: w.notes,
+        createdAt: w.created_at,
+        updatedAt: w.updated_at,
+      })),
+    });
+  } catch (error) {
+    console.error('Get partner withdrawals error:', error);
+    res.status(500).json({ error: 'Failed to get payout history' });
+  }
+});
+
+router.get('/', authorize('admin'), async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT * FROM partners ORDER BY created_at DESC`);
+    res.json({ partners: result.rows.map(mapPartner) });
+  } catch (error) {
+    console.error('Admin get partners error:', error);
+    res.status(500).json({ error: 'Failed to get partners' });
+  }
+});
+
+router.put('/:partnerId', [
+  body('commissionPercentage').optional().isFloat({ min: 0, max: 100 }),
+  body('isActive').optional().isBoolean(),
+  body('businessName').optional().trim(),
+], authorize('admin'), async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const updates = [];
+    const values = [];
+    let index = 1;
+
+    if (req.body.commissionPercentage !== undefined) {
+      updates.push(`commission_percentage = $${index++}`);
+      values.push(req.body.commissionPercentage);
+    }
+    if (req.body.isActive !== undefined) {
+      updates.push(`is_active = $${index++}`);
+      values.push(req.body.isActive);
+    }
+    if (req.body.businessName !== undefined) {
+      updates.push(`business_name = $${index++}`);
+      values.push(req.body.businessName || null);
+    }
+
+    if (!updates.length) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+
+    values.push(req.params.partnerId);
+    const result = await pool.query(
+      `UPDATE partners SET ${updates.join(', ')}, updated_at = CURRENT_TIMESTAMP
+       WHERE id = $${index}
+       RETURNING *`,
+      values
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Partner not found' });
+    }
+
+    res.json({ partner: mapPartner(result.rows[0]) });
+  } catch (error) {
+    console.error('Admin update partner error:', error);
+    res.status(500).json({ error: 'Failed to update partner' });
+  }
+});
+
+router.get('/admin/withdrawals', authorize('admin'), async (req, res) => {
+  try {
+    const { status } = req.query;
+    const params = [];
+    let query = `
+      SELECT w.*, p.full_name as partner_name, p.business_name, p.email as partner_email, p.phone as partner_phone
+      FROM partner_withdrawals w
+      INNER JOIN partners p ON w.partner_id = p.id
+    `;
+    if (status) {
+      query += ' WHERE w.status = $1';
+      params.push(status);
+    }
+    query += ' ORDER BY w.created_at DESC';
+    const result = await pool.query(query, params);
+    res.json({
+      withdrawals: result.rows.map((w) => ({
+        id: w.id,
+        partnerId: w.partner_id,
+        partnerName: w.business_name || w.partner_name,
+        partnerEmail: w.partner_email,
+        partnerPhone: w.partner_phone,
+        amount: parseFloat(w.amount),
+        status: w.status,
+        bankName: w.bank_name,
+        accountNumber: w.account_number,
+        accountName: w.account_name,
+        notes: w.notes,
+        createdAt: w.created_at,
+        updatedAt: w.updated_at,
+      })),
+    });
+  } catch (error) {
+    console.error('Admin get partner withdrawals error:', error);
+    res.status(500).json({ error: 'Failed to get partner withdrawals' });
+  }
+});
+
+router.put('/admin/withdrawals/:id/status', [
+  body('status').isIn(['pending', 'processing', 'completed', 'failed']),
+  body('notes').optional().trim(),
+], authorize('admin'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { id } = req.params;
+    const { status, notes } = req.body;
+    await client.query('BEGIN');
+
+    const withdrawalResult = await client.query(
+      `SELECT * FROM partner_withdrawals WHERE id = $1 FOR UPDATE`,
+      [id]
+    );
+    if (withdrawalResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Partner withdrawal not found' });
+    }
+
+    const withdrawal = withdrawalResult.rows[0];
+    if (status === 'failed' && withdrawal.status !== 'failed') {
+      await client.query(
+        `UPDATE partners SET wallet_balance = wallet_balance + $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+        [withdrawal.amount, withdrawal.partner_id]
+      );
+    }
+
+    const updated = await client.query(
+      `UPDATE partner_withdrawals
+       SET status = $1, notes = COALESCE($2, notes), updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3
+       RETURNING *`,
+      [status, notes || null, id]
+    );
+
+    await client.query('COMMIT');
+    res.json({ withdrawal: updated.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Update partner withdrawal status error:', error);
+    res.status(500).json({ error: 'Failed to update partner withdrawal status' });
+  } finally {
+    client.release();
+  }
+});
+
+module.exports = router;

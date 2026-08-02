@@ -163,9 +163,9 @@ router.post('/login', [
  */
 router.get('/me', authenticate, async (req, res) => {
   try {
-    const table = req.user.accountType === 'driver' ? 'drivers' : 'users';
+    const table = req.user.accountType === 'driver' ? 'drivers' : req.user.accountType === 'partner' ? 'partners' : 'users';
     const result = await pool.query(
-      `SELECT id, email, phone, full_name, ${table === 'users' ? 'role,' : 'verification_status,'} created_at FROM ${table} WHERE id = $1`,
+      `SELECT id, email, phone, full_name, ${table === 'users' ? 'role,' : table === 'drivers' ? 'verification_status,' : 'business_name, commission_percentage,'} created_at FROM ${table} WHERE id = $1`,
       [req.user.id]
     );
 
@@ -180,7 +180,9 @@ router.get('/me', authenticate, async (req, res) => {
         email: dbUser.email,
         fullName: dbUser.full_name,
         phone: dbUser.phone,
-        role: req.user.accountType === 'driver' ? 'driver' : dbUser.role,
+        role: req.user.accountType === 'driver' ? 'driver' : req.user.accountType === 'partner' ? 'partner' : dbUser.role,
+        businessName: req.user.accountType === 'partner' ? dbUser.business_name : undefined,
+        commissionPercentage: req.user.accountType === 'partner' ? parseFloat(dbUser.commission_percentage || 0) : undefined,
         verificationStatus: req.user.accountType === 'driver' ? dbUser.verification_status : undefined,
         createdAt: dbUser.created_at
       }
@@ -207,7 +209,7 @@ router.put('/profile', [
     }
 
     const { fullName, phone } = req.body;
-    const table = req.user.accountType === 'driver' ? 'drivers' : 'users';
+    const table = req.user.accountType === 'driver' ? 'drivers' : req.user.accountType === 'partner' ? 'partners' : 'users';
     const updates = [];
     const values = [];
     let paramCount = 1;
@@ -240,7 +242,7 @@ router.put('/profile', [
         email: dbUser.email,
         fullName: dbUser.full_name,
         phone: dbUser.phone,
-        role: req.user.accountType === 'driver' ? 'driver' : dbUser.role,
+        role: req.user.accountType === 'driver' ? 'driver' : req.user.accountType === 'partner' ? 'partner' : dbUser.role,
         createdAt: dbUser.created_at
       }
     });

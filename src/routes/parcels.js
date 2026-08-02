@@ -143,6 +143,18 @@ router.post('/', [
     const normalizedPickupState = normalizeState(pricing.pickupState);
     const normalizedDeliveryState = normalizeState(pricing.deliveryState);
 
+    let partnerProfile = null;
+    if (req.user.role === 'partner') {
+      const partnerResult = await pool.query(
+        `SELECT id, commission_percentage FROM partners WHERE id = $1 AND is_active = true`,
+        [req.user.id]
+      );
+      if (partnerResult.rows.length === 0) {
+        return res.status(403).json({ error: 'Partner account is inactive or unavailable' });
+      }
+      partnerProfile = partnerResult.rows[0];
+    }
+
     // Create parcel
     const result = await pool.query(
       `INSERT INTO parcels (
@@ -150,8 +162,8 @@ router.post('/', [
         pickup_address, delivery_address, parcel_type, weight,
         dimensions, service_type, status, price, insurance,
         description, estimated_delivery_date, distance_km, pickup_state, delivery_state,
-        delivery_code
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        delivery_code, partner_id, partner_commission_percentage, partner_commission_amount
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
       RETURNING *`,
       [
         trackingId, req.user.id, recipientName, recipientPhone,
@@ -159,9 +171,19 @@ router.post('/', [
         JSON.stringify(dimensions || {}), serviceType, 'created',
         pricing.price, insurance, description, estimatedDelivery,
         pricing.distance, normalizedPickupState || null, normalizedDeliveryState || null,
-        deliveryCode
+        deliveryCode,
+        partnerProfile?.id || null,
+        partnerProfile?.commission_percentage || null,
+        partnerProfile ? (parseFloat(pricing.price) * parseFloat(partnerProfile.commission_percentage || 0)) / 100 : 0
       ]
     );
+
+    if (partnerProfile) {
+      await pool.query(
+        `UPDATE partners SET total_orders = total_orders + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+        [partnerProfile.id]
+      );
+    }
 
     const parcel = result.rows[0];
 
@@ -198,6 +220,14 @@ router.get('/', async (req, res) => {
         SELECT p.*
         FROM parcels p
         WHERE p.sender_id = $1
+        ORDER BY p.created_at DESC
+      `;
+      params = [req.user.id];
+    } else if (req.user.role === 'partner') {
+      query = `
+        SELECT p.*
+        FROM parcels p
+        WHERE p.partner_id = $1
         ORDER BY p.created_at DESC
       `;
       params = [req.user.id];
@@ -246,6 +276,13 @@ router.get('/:id', async (req, res) => {
         LEFT JOIN assignments a ON p.id = a.parcel_id
         LEFT JOIN drivers d ON a.driver_id = d.id
         WHERE p.id = $1 AND p.sender_id = $2
+      `;
+      params = [id, req.user.id];
+    } else if (req.user.role === 'partner') {
+      query = `
+        SELECT p.*
+        FROM parcels p
+        WHERE p.id = $1 AND p.partner_id = $2
       `;
       params = [id, req.user.id];
     } else if (req.user.role === 'driver') {
@@ -458,6 +495,24 @@ router.put('/:id/status', [
          WHERE id = (SELECT driver_id FROM assignments WHERE parcel_id = $2 LIMIT 1)`,
         [parcel.price, id]
       );
+
+      if (parcel.partner_id && !parcel.partner_commission_credited_at) {
+        const commissionAmount = parseFloat(parcel.partner_commission_amount || 0);
+        if (commissionAmount > 0) {
+          await pool.query(
+            `UPDATE partners
+             SET completed_orders = completed_orders + 1,
+                 wallet_balance = wallet_balance + $1,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $2`,
+            [commissionAmount, parcel.partner_id]
+          );
+          await pool.query(
+            `UPDATE parcels SET partner_commission_credited_at = CURRENT_TIMESTAMP WHERE id = $1`,
+            [id]
+          );
+        }
+      }
     }
 
     notifyStatusUpdate(id, status, parcel.sender_id).catch((err) =>

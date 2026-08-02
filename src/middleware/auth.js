@@ -28,9 +28,10 @@ const authenticate = async (req, res, next) => {
       return res.status(401).json({ error: 'Authentication required' });
     }
 
-    const requestedRole = req.get('x-app-role') === 'driver' ? 'driver' : 'customer';
-    const table = requestedRole === 'driver' ? 'drivers' : 'users';
-    const columns = `id, email, phone, full_name, ${requestedRole !== 'driver' ? 'role,' : ''} is_active`;
+    const headerRole = req.get('x-app-role');
+    const requestedRole = headerRole === 'driver' ? 'driver' : headerRole === 'partner' ? 'partner' : 'customer';
+    const table = requestedRole === 'driver' ? 'drivers' : requestedRole === 'partner' ? 'partners' : 'users';
+    const columns = `id, email, phone, full_name, ${requestedRole === 'customer' ? 'role,' : ''} is_active`;
 
     // 1. Check if user already exists locally by clerk_id
     let result = await pool.query(
@@ -50,8 +51,8 @@ const authenticate = async (req, res, next) => {
         'Clerk User';
       
       const role = clerkUser.publicMetadata.role || requestedRole;
-      const syncTable = role === 'driver' ? 'drivers' : 'users';
-      const syncColumns = `id, email, phone, full_name, ${role !== 'driver' ? 'role,' : ''} is_active`;
+      const syncTable = role === 'driver' ? 'drivers' : role === 'partner' ? 'partners' : 'users';
+      const syncColumns = `id, email, phone, full_name, ${role === 'customer' ? 'role,' : ''} is_active`;
 
       // Try search by email to link
       if (email) {
@@ -83,6 +84,44 @@ const authenticate = async (req, res, next) => {
              RETURNING ${syncColumns}`,
             [email, fullName, CLERK_MANAGED_PASSWORD, userId, clerkUser.imageUrl || null]
           );
+        } else if (role === 'partner') {
+          const userResult = await pool.query(
+            `INSERT INTO users (email, full_name, password_hash, role, is_active, clerk_id, profile_pic)
+             VALUES ($1, $2, $3, 'partner', true, $4, $5)
+             ON CONFLICT (email) DO UPDATE
+               SET role = 'partner',
+                   clerk_id = COALESCE(users.clerk_id, EXCLUDED.clerk_id),
+                   full_name = COALESCE(NULLIF(EXCLUDED.full_name, ''), users.full_name),
+                   profile_pic = COALESCE(EXCLUDED.profile_pic, users.profile_pic),
+                   updated_at = CURRENT_TIMESTAMP
+             RETURNING id`,
+            [email, fullName, CLERK_MANAGED_PASSWORD, userId, clerkUser.imageUrl || null]
+          );
+
+          result = await pool.query(
+            `INSERT INTO partners (id, email, full_name, password_hash, is_active, clerk_id, profile_pic)
+             VALUES ($1, $2, $3, $4, true, $5, $6)
+             ON CONFLICT (email) DO UPDATE
+               SET clerk_id = COALESCE(partners.clerk_id, EXCLUDED.clerk_id),
+                   full_name = COALESCE(NULLIF(EXCLUDED.full_name, ''), partners.full_name),
+                   profile_pic = COALESCE(EXCLUDED.profile_pic, partners.profile_pic),
+                   updated_at = CURRENT_TIMESTAMP
+             RETURNING ${syncColumns}`,
+            [userResult.rows[0].id, email, fullName, CLERK_MANAGED_PASSWORD, userId, clerkUser.imageUrl || null]
+          );
+          if (result.rows[0]?.id !== userResult.rows[0].id) {
+            await pool.query(
+              `INSERT INTO users (id, email, full_name, password_hash, role, is_active, clerk_id, profile_pic)
+               VALUES ($1, $2, $3, $4, 'partner', true, $5, $6)
+               ON CONFLICT (email) DO UPDATE
+                 SET role = 'partner',
+                     clerk_id = COALESCE(users.clerk_id, EXCLUDED.clerk_id),
+                     full_name = COALESCE(NULLIF(EXCLUDED.full_name, ''), users.full_name),
+                     profile_pic = COALESCE(EXCLUDED.profile_pic, users.profile_pic),
+                     updated_at = CURRENT_TIMESTAMP`,
+              [result.rows[0].id, email, fullName, CLERK_MANAGED_PASSWORD, userId, clerkUser.imageUrl || null]
+            );
+          }
         } else {
           result = await pool.query(
             `INSERT INTO users (email, full_name, password_hash, role, is_active, clerk_id, profile_pic)
@@ -99,12 +138,25 @@ const authenticate = async (req, res, next) => {
       return res.status(401).json({ error: 'Account is inactive' });
     }
 
+    if (requestedRole === 'partner') {
+      await pool.query(
+        `INSERT INTO users (id, email, full_name, password_hash, role, is_active, clerk_id)
+         VALUES ($1, $2, $3, $4, 'partner', true, $5)
+         ON CONFLICT (id) DO UPDATE
+           SET role = 'partner',
+               clerk_id = COALESCE(users.clerk_id, EXCLUDED.clerk_id),
+               full_name = COALESCE(NULLIF(EXCLUDED.full_name, ''), users.full_name),
+               updated_at = CURRENT_TIMESTAMP`,
+        [localUser.id, localUser.email, localUser.full_name, CLERK_MANAGED_PASSWORD, userId]
+      );
+    }
+
     req.user = {
       id: localUser.id,
       clerkId: userId,
       email: localUser.email,
-      role: localUser.role || (requestedRole === 'driver' ? 'driver' : 'customer'),
-      accountType: localUser.role === 'admin' ? 'admin' : (table === 'drivers' ? 'driver' : 'user')
+      role: localUser.role || requestedRole,
+      accountType: localUser.role === 'admin' ? 'admin' : (table === 'drivers' ? 'driver' : table === 'partners' ? 'partner' : 'user')
     };
 
     next();

@@ -1,5 +1,7 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
+const bcrypt = require('bcrypt');
+const crypto = require('crypto');
 const pool = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
 
@@ -42,6 +44,21 @@ const mapOrder = (row) => ({
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 });
+
+const generateTemporaryPassword = () => {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@$%';
+  const bytes = crypto.randomBytes(14);
+  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join('');
+};
+
+const getDefaultCommissionPercentage = async (client = pool) => {
+  const result = await client.query(
+    `SELECT value FROM app_settings WHERE key = 'partner_default_commission_percentage'`
+  );
+  const rawValue = result.rows[0]?.value;
+  const numericValue = Number(rawValue);
+  return Number.isFinite(numericValue) ? numericValue : 10;
+};
 
 router.get('/me', authorize('partner'), async (req, res) => {
   try {
@@ -246,11 +263,53 @@ router.get('/me/withdrawals', authorize('partner'), async (req, res) => {
 
 router.get('/', authorize('admin'), async (req, res) => {
   try {
-    const result = await pool.query(`SELECT * FROM partners ORDER BY created_at DESC`);
-    res.json({ partners: result.rows.map(mapPartner) });
+    const [partnerResult, defaultCommissionPercentage] = await Promise.all([
+      pool.query(`SELECT * FROM partners ORDER BY created_at DESC`),
+      getDefaultCommissionPercentage(),
+    ]);
+    res.json({
+      partners: partnerResult.rows.map(mapPartner),
+      settings: { defaultCommissionPercentage },
+    });
   } catch (error) {
     console.error('Admin get partners error:', error);
     res.status(500).json({ error: 'Failed to get partners' });
+  }
+});
+
+router.get('/settings', authorize('admin'), async (req, res) => {
+  try {
+    const defaultCommissionPercentage = await getDefaultCommissionPercentage();
+    res.json({ settings: { defaultCommissionPercentage } });
+  } catch (error) {
+    console.error('Get partner settings error:', error);
+    res.status(500).json({ error: 'Failed to get partner settings' });
+  }
+});
+
+router.put('/settings', [
+  body('defaultCommissionPercentage').isFloat({ min: 0, max: 100 }),
+], authorize('admin'), async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const defaultCommissionPercentage = Number(req.body.defaultCommissionPercentage);
+    await pool.query(
+      `INSERT INTO app_settings (key, value)
+       VALUES ('partner_default_commission_percentage', $1::jsonb)
+       ON CONFLICT (key) DO UPDATE
+         SET value = EXCLUDED.value,
+             updated_at = CURRENT_TIMESTAMP`,
+      [JSON.stringify(defaultCommissionPercentage)]
+    );
+
+    res.json({ settings: { defaultCommissionPercentage } });
+  } catch (error) {
+    console.error('Update partner settings error:', error);
+    res.status(500).json({ error: 'Failed to update partner settings' });
   }
 });
 
@@ -259,7 +318,7 @@ router.post('/', [
   body('fullName').trim().notEmpty(),
   body('phone').optional().trim(),
   body('businessName').optional().trim(),
-  body('commissionPercentage').optional().isFloat({ min: 0, max: 100 }),
+  body('commissionPercentage').optional({ nullable: true }).isFloat({ min: 0, max: 100 }),
   body('isActive').optional().isBoolean(),
 ], authorize('admin'), async (req, res) => {
   const client = await pool.connect();
@@ -274,23 +333,29 @@ router.post('/', [
       fullName,
       phone,
       businessName,
-      commissionPercentage = 10,
       isActive = true,
     } = req.body;
 
     await client.query('BEGIN');
+    const defaultCommissionPercentage = await getDefaultCommissionPercentage(client);
+    const commissionPercentage = req.body.commissionPercentage === undefined || req.body.commissionPercentage === null || req.body.commissionPercentage === ''
+      ? defaultCommissionPercentage
+      : Number(req.body.commissionPercentage);
+    const temporaryPassword = generateTemporaryPassword();
+    const passwordHash = await bcrypt.hash(temporaryPassword, 10);
 
     const userResult = await client.query(
       `INSERT INTO users (email, phone, full_name, password_hash, role, is_active)
-       VALUES ($1, $2, $3, 'partner_managed', 'partner', $4)
+       VALUES ($1, $2, $3, $4, 'partner', $5)
        ON CONFLICT (email) DO UPDATE
          SET role = 'partner',
+             password_hash = EXCLUDED.password_hash,
              phone = COALESCE(EXCLUDED.phone, users.phone),
              full_name = COALESCE(NULLIF(EXCLUDED.full_name, ''), users.full_name),
              is_active = EXCLUDED.is_active,
              updated_at = CURRENT_TIMESTAMP
        RETURNING id`,
-      [email, phone || null, fullName, isActive]
+      [email, phone || null, fullName, passwordHash, isActive]
     );
 
     const partnerResult = await client.query(
@@ -298,9 +363,10 @@ router.post('/', [
          id, email, phone, full_name, business_name, password_hash,
          commission_percentage, is_active
        )
-       VALUES ($1, $2, $3, $4, $5, 'partner_managed', $6, $7)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (email) DO UPDATE
          SET phone = COALESCE(EXCLUDED.phone, partners.phone),
+             password_hash = EXCLUDED.password_hash,
              full_name = COALESCE(NULLIF(EXCLUDED.full_name, ''), partners.full_name),
              business_name = EXCLUDED.business_name,
              commission_percentage = EXCLUDED.commission_percentage,
@@ -313,13 +379,17 @@ router.post('/', [
         phone || null,
         fullName,
         businessName || null,
+        passwordHash,
         commissionPercentage,
         isActive,
       ]
     );
 
     await client.query('COMMIT');
-    res.status(201).json({ partner: mapPartner(partnerResult.rows[0]) });
+    res.status(201).json({
+      partner: mapPartner(partnerResult.rows[0]),
+      temporaryPassword,
+    });
   } catch (error) {
     await client.query('ROLLBACK');
     console.error('Admin create partner error:', error);

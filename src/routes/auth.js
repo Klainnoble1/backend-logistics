@@ -134,7 +134,7 @@ router.post('/login', [
         id: user.id, 
         email: user.email, 
         role: user.role || 'driver',
-        accountType: user.role === 'admin' ? 'admin' : accountType
+        accountType: user.role === 'admin' ? 'admin' : user.role === 'partner' ? 'partner' : accountType
       },
       process.env.JWT_SECRET,
       { expiresIn: '30d' }

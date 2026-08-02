@@ -254,6 +254,81 @@ router.get('/', authorize('admin'), async (req, res) => {
   }
 });
 
+router.post('/', [
+  body('email').isEmail().normalizeEmail(),
+  body('fullName').trim().notEmpty(),
+  body('phone').optional().trim(),
+  body('businessName').optional().trim(),
+  body('commissionPercentage').optional().isFloat({ min: 0, max: 100 }),
+  body('isActive').optional().isBoolean(),
+], authorize('admin'), async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const {
+      email,
+      fullName,
+      phone,
+      businessName,
+      commissionPercentage = 10,
+      isActive = true,
+    } = req.body;
+
+    await client.query('BEGIN');
+
+    const userResult = await client.query(
+      `INSERT INTO users (email, phone, full_name, password_hash, role, is_active)
+       VALUES ($1, $2, $3, 'partner_managed', 'partner', $4)
+       ON CONFLICT (email) DO UPDATE
+         SET role = 'partner',
+             phone = COALESCE(EXCLUDED.phone, users.phone),
+             full_name = COALESCE(NULLIF(EXCLUDED.full_name, ''), users.full_name),
+             is_active = EXCLUDED.is_active,
+             updated_at = CURRENT_TIMESTAMP
+       RETURNING id`,
+      [email, phone || null, fullName, isActive]
+    );
+
+    const partnerResult = await client.query(
+      `INSERT INTO partners (
+         id, email, phone, full_name, business_name, password_hash,
+         commission_percentage, is_active
+       )
+       VALUES ($1, $2, $3, $4, $5, 'partner_managed', $6, $7)
+       ON CONFLICT (email) DO UPDATE
+         SET phone = COALESCE(EXCLUDED.phone, partners.phone),
+             full_name = COALESCE(NULLIF(EXCLUDED.full_name, ''), partners.full_name),
+             business_name = EXCLUDED.business_name,
+             commission_percentage = EXCLUDED.commission_percentage,
+             is_active = EXCLUDED.is_active,
+             updated_at = CURRENT_TIMESTAMP
+       RETURNING *`,
+      [
+        userResult.rows[0].id,
+        email,
+        phone || null,
+        fullName,
+        businessName || null,
+        commissionPercentage,
+        isActive,
+      ]
+    );
+
+    await client.query('COMMIT');
+    res.status(201).json({ partner: mapPartner(partnerResult.rows[0]) });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    console.error('Admin create partner error:', error);
+    res.status(500).json({ error: 'Failed to create partner' });
+  } finally {
+    client.release();
+  }
+});
+
 router.put('/:partnerId', [
   body('commissionPercentage').optional().isFloat({ min: 0, max: 100 }),
   body('isActive').optional().isBoolean(),

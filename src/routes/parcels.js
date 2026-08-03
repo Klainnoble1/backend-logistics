@@ -103,7 +103,8 @@ router.post('/', [
   body('serviceType').isIn(['standard', 'express']),
   body('parcelType').optional().trim(),
   body('description').optional().trim(),
-  body('insurance').optional().isBoolean()
+  body('insurance').optional().isBoolean(),
+  body('purchaseCost').optional({ nullable: true }).isFloat({ min: 0 })
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -121,11 +122,14 @@ router.post('/', [
       dimensions,
       serviceType,
       description,
-      insurance = false
+      insurance = false,
+      purchaseCost = 0
     } = req.body;
 
     // Calculate price
     const pricing = await calculatePrice(pickupAddress, deliveryAddress, weight, serviceType, insurance);
+    const deliveryPrice = Number(pricing.price);
+    let normalizedPurchaseCost = 0;
     const estimatedDelivery = estimateDeliveryDate(serviceType, pricing.distance);
 
     // Generate unique tracking ID and delivery code
@@ -146,7 +150,7 @@ router.post('/', [
     let partnerProfile = null;
     if (req.user.role === 'partner') {
       const partnerResult = await pool.query(
-        `SELECT id, commission_percentage FROM partners WHERE id = $1 AND is_active = true`,
+        `SELECT id, commission_percentage, account_type FROM partners WHERE id = $1 AND is_active = true`,
         [req.user.id]
       );
       if (partnerResult.rows.length === 0) {
@@ -155,26 +159,37 @@ router.post('/', [
       partnerProfile = partnerResult.rows[0];
     }
 
+    normalizedPurchaseCost = Number(purchaseCost || 0);
+    if (!Number.isFinite(normalizedPurchaseCost) || normalizedPurchaseCost < 0) {
+      return res.status(400).json({ error: 'Purchase cost must be a valid amount' });
+    }
+
+    if (normalizedPurchaseCost > 0 && partnerProfile?.account_type !== 'business_owner') {
+      return res.status(403).json({ error: 'Only business owner partner accounts can add purchase cost' });
+    }
+
+    const totalPrice = deliveryPrice + normalizedPurchaseCost;
+
     // Create parcel
     const result = await pool.query(
       `INSERT INTO parcels (
         tracking_id, sender_id, recipient_name, recipient_phone,
         pickup_address, delivery_address, parcel_type, weight,
-        dimensions, service_type, status, price, insurance,
+        dimensions, service_type, status, price, delivery_price, purchase_cost, insurance,
         description, estimated_delivery_date, distance_km, pickup_state, delivery_state,
         delivery_code, partner_id, partner_commission_percentage, partner_commission_amount
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
       RETURNING *`,
       [
         trackingId, req.user.id, recipientName, recipientPhone,
         pickupAddress, deliveryAddress, parcelType, weight,
         JSON.stringify(dimensions || {}), serviceType, 'created',
-        pricing.price, insurance, description, estimatedDelivery,
+        totalPrice, deliveryPrice, normalizedPurchaseCost, insurance, description, estimatedDelivery,
         pricing.distance, normalizedPickupState || null, normalizedDeliveryState || null,
         deliveryCode,
         partnerProfile?.id || null,
         partnerProfile?.commission_percentage || null,
-        partnerProfile ? (parseFloat(pricing.price) * parseFloat(partnerProfile.commission_percentage || 0)) / 100 : 0
+        partnerProfile ? (deliveryPrice * parseFloat(partnerProfile.commission_percentage || 0)) / 100 : 0
       ]
     );
 
@@ -199,6 +214,9 @@ router.post('/', [
       parcel: {
         ...parcel,
         pricing: pricing.breakdown,
+        deliveryPrice,
+        purchaseCost: normalizedPurchaseCost,
+        totalPrice,
         estimatedDeliveryDate: estimatedDelivery
       }
     });
@@ -498,14 +516,16 @@ router.put('/:id/status', [
 
       if (parcel.partner_id && !parcel.partner_commission_credited_at) {
         const commissionAmount = parseFloat(parcel.partner_commission_amount || 0);
-        if (commissionAmount > 0) {
+        const purchaseCost = parseFloat(parcel.purchase_cost || 0);
+        const partnerCreditAmount = commissionAmount + purchaseCost;
+        if (partnerCreditAmount > 0) {
           await pool.query(
             `UPDATE partners
              SET completed_orders = completed_orders + 1,
                  wallet_balance = wallet_balance + $1,
                  updated_at = CURRENT_TIMESTAMP
              WHERE id = $2`,
-            [commissionAmount, parcel.partner_id]
+            [partnerCreditAmount, parcel.partner_id]
           );
           await pool.query(
             `UPDATE parcels SET partner_commission_credited_at = CURRENT_TIMESTAMP WHERE id = $1`,

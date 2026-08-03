@@ -51,6 +51,19 @@ const authenticate = async (req, res, next) => {
         'Clerk User';
       
       const role = clerkUser.publicMetadata.role || requestedRole;
+      const partnerAccountType =
+        clerkUser.publicMetadata.accountType === 'business_owner' ||
+        clerkUser.unsafeMetadata?.accountType === 'business_owner'
+          ? 'business_owner'
+          : 'partner';
+      const partnerBusinessName =
+        clerkUser.publicMetadata.businessName ||
+        clerkUser.unsafeMetadata?.businessName ||
+        null;
+      const partnerPhone =
+        clerkUser.publicMetadata.phone ||
+        clerkUser.unsafeMetadata?.phone ||
+        null;
       const syncTable = role === 'driver' ? 'drivers' : role === 'partner' ? 'partners' : 'users';
       const syncColumns = `id, email, phone, full_name, ${role === 'customer' ? 'role,' : ''} is_active`;
 
@@ -99,15 +112,28 @@ const authenticate = async (req, res, next) => {
           );
 
           result = await pool.query(
-            `INSERT INTO partners (id, email, full_name, password_hash, is_active, clerk_id, profile_pic)
-             VALUES ($1, $2, $3, $4, true, $5, $6)
+            `INSERT INTO partners (id, email, phone, full_name, business_name, account_type, password_hash, is_active, clerk_id, profile_pic)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9)
              ON CONFLICT (email) DO UPDATE
                SET clerk_id = COALESCE(partners.clerk_id, EXCLUDED.clerk_id),
+                   phone = COALESCE(EXCLUDED.phone, partners.phone),
                    full_name = COALESCE(NULLIF(EXCLUDED.full_name, ''), partners.full_name),
+                   business_name = COALESCE(EXCLUDED.business_name, partners.business_name),
+                   account_type = EXCLUDED.account_type,
                    profile_pic = COALESCE(EXCLUDED.profile_pic, partners.profile_pic),
                    updated_at = CURRENT_TIMESTAMP
              RETURNING ${syncColumns}`,
-            [userResult.rows[0].id, email, fullName, CLERK_MANAGED_PASSWORD, userId, clerkUser.imageUrl || null]
+            [
+              userResult.rows[0].id,
+              email,
+              partnerPhone,
+              fullName,
+              partnerBusinessName,
+              partnerAccountType,
+              CLERK_MANAGED_PASSWORD,
+              userId,
+              clerkUser.imageUrl || null,
+            ]
           );
           if (result.rows[0]?.id !== userResult.rows[0].id) {
             await pool.query(
@@ -131,6 +157,19 @@ const authenticate = async (req, res, next) => {
           );
         }
       }
+
+      if (role === 'partner' && result.rows[0]) {
+        await pool.query(
+          `UPDATE partners
+           SET account_type = $2,
+               business_name = COALESCE($3, business_name),
+               phone = COALESCE($4, phone),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE id = $1`,
+          [result.rows[0].id, partnerAccountType, partnerBusinessName, partnerPhone]
+        );
+      }
+
       localUser = result.rows[0];
     }
 

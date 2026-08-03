@@ -16,6 +16,7 @@ const mapPartner = (row) => ({
   phone: row.phone,
   fullName: row.full_name,
   businessName: row.business_name,
+  accountType: row.account_type || 'partner',
   commissionPercentage: parseFloat(row.commission_percentage || 0),
   walletBalance: parseFloat(row.wallet_balance || 0),
   totalOrders: row.total_orders || 0,
@@ -375,6 +376,7 @@ router.post('/', [
   body('fullName').trim().notEmpty(),
   body('phone').optional().trim(),
   body('businessName').optional().trim(),
+  body('accountType').optional().isIn(['partner', 'business_owner']),
   body('commissionPercentage').optional({ nullable: true }).isFloat({ min: 0, max: 100 }),
   body('isActive').optional().isBoolean(),
 ], authorize('admin'), async (req, res) => {
@@ -390,6 +392,7 @@ router.post('/', [
       fullName,
       phone,
       businessName,
+      accountType = 'partner',
       isActive = true,
     } = req.body;
 
@@ -417,15 +420,16 @@ router.post('/', [
 
     const partnerResult = await client.query(
       `INSERT INTO partners (
-         id, email, phone, full_name, business_name, password_hash,
+         id, email, phone, full_name, business_name, account_type, password_hash,
          commission_percentage, is_active
        )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        ON CONFLICT (email) DO UPDATE
          SET phone = COALESCE(EXCLUDED.phone, partners.phone),
              password_hash = EXCLUDED.password_hash,
              full_name = COALESCE(NULLIF(EXCLUDED.full_name, ''), partners.full_name),
              business_name = EXCLUDED.business_name,
+             account_type = EXCLUDED.account_type,
              commission_percentage = EXCLUDED.commission_percentage,
              is_active = EXCLUDED.is_active,
              updated_at = CURRENT_TIMESTAMP
@@ -436,6 +440,7 @@ router.post('/', [
         phone || null,
         fullName,
         businessName || null,
+        accountType,
         passwordHash,
         commissionPercentage,
         isActive,
@@ -460,6 +465,7 @@ router.put('/:partnerId', [
   body('commissionPercentage').optional().isFloat({ min: 0, max: 100 }),
   body('isActive').optional().isBoolean(),
   body('businessName').optional().trim(),
+  body('accountType').optional().isIn(['partner', 'business_owner']),
 ], authorize('admin'), async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -482,6 +488,10 @@ router.put('/:partnerId', [
     if (req.body.businessName !== undefined) {
       updates.push(`business_name = $${index++}`);
       values.push(req.body.businessName || null);
+    }
+    if (req.body.accountType !== undefined) {
+      updates.push(`account_type = $${index++}`);
+      values.push(req.body.accountType);
     }
 
     if (!updates.length) {

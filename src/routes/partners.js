@@ -4,6 +4,7 @@ const bcrypt = require('bcrypt');
 const crypto = require('crypto');
 const pool = require('../config/database');
 const { authenticate, authorize } = require('../middleware/auth');
+const { initializePayment } = require('../services/paymentService');
 
 const router = express.Router();
 
@@ -106,6 +107,62 @@ router.get('/me/orders', authorize('partner'), async (req, res) => {
   } catch (error) {
     console.error('Get partner orders error:', error);
     res.status(500).json({ error: 'Failed to get partner orders' });
+  }
+});
+
+router.post('/me/orders/:orderId/payment-link', authorize('partner'), async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const result = await pool.query(
+      `SELECT p.*, u.email AS sender_email
+       FROM parcels p
+       INNER JOIN users u ON p.sender_id = u.id
+       WHERE p.id = $1 AND p.partner_id = $2
+       LIMIT 1`,
+      [orderId, req.user.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Partner order not found' });
+    }
+
+    const order = result.rows[0];
+    if (order.status !== 'created') {
+      return res.status(400).json({ error: 'Payment links can only be generated for unpaid orders' });
+    }
+
+    const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+    const returnUrl = `${baseUrl}/api/payments/recipient-complete`;
+    const callbackUrl = `${baseUrl}/api/payments/paystack-callback?returnUrl=${encodeURIComponent(returnUrl)}`;
+    const email = order.sender_email || req.user.email || 'recipient@example.com';
+
+    const payment = await initializePayment(order.id, order.sender_id, order.price, email, callbackUrl, {
+      return_url: returnUrl,
+      initiated_by: 'partner',
+      partner_id: req.user.id,
+      recipient_name: order.recipient_name,
+      recipient_phone: order.recipient_phone,
+      tracking_id: order.tracking_id,
+    });
+
+    if (!payment.authorization_url) {
+      return res.status(503).json({
+        error: payment.message || 'Payment provider is not configured',
+        payment,
+      });
+    }
+
+    res.status(201).json({
+      message: 'Payment link generated',
+      paymentLink: payment.authorization_url,
+      reference: payment.reference,
+      paymentId: payment.paymentId,
+      amount: payment.amount,
+      order: mapOrder(order),
+    });
+  } catch (error) {
+    console.error('Generate partner payment link error:', error);
+    res.status(500).json({ error: error.response?.data?.message || 'Failed to generate payment link' });
   }
 });
 

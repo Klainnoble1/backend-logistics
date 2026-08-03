@@ -16,6 +16,8 @@ const {
 const router = express.Router();
 const DEFAULT_RETURN_URL = process.env.APP_URL || 'oprime-logistics://payment-return';
 
+const getBaseUrl = (req) => process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+
 const buildRedirectUrl = (rawReturnUrl, params = {}) => {
   const destination = resolveReturnUrl(rawReturnUrl);
   const target = new URL(destination);
@@ -30,7 +32,7 @@ const buildRedirectUrl = (rawReturnUrl, params = {}) => {
 };
 
 const getConfiguredWebOrigins = () =>
-  [process.env.APP_URL, process.env.WEB_APP_URL]
+  [process.env.APP_URL, process.env.WEB_APP_URL, process.env.BASE_URL]
     .filter(Boolean)
     .map((entry) => {
       try {
@@ -199,6 +201,40 @@ router.get('/paystack-callback', async (req, res) => {
   }
 });
 
+// Recipient payment completion page (no auth - used by shared partner payment links)
+router.get('/recipient-complete', (req, res) => {
+  const paymentStatus = req.query.payment;
+  const isSuccess = paymentStatus === 'success';
+  const title = isSuccess ? 'Payment successful' : 'Payment not completed';
+  const message = isSuccess
+    ? 'This order has been paid and is ready for driver pickup.'
+    : 'The payment was not completed. Please contact the sender or try the payment link again.';
+
+  res.send(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title>${title}</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: #f8fafc; color: #0f172a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+          .card { width: min(420px, calc(100% - 32px)); background: #fff; border: 1px solid #e2e8f0; border-radius: 24px; padding: 32px; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.08); text-align: center; }
+          .icon { width: 64px; height: 64px; border-radius: 50%; margin: 0 auto 18px; display: flex; align-items: center; justify-content: center; font-size: 32px; font-weight: 900; background: ${isSuccess ? '#dcfce7' : '#fee2e2'}; color: ${isSuccess ? '#15803d' : '#b91c1c'}; }
+          h1 { margin: 0 0 10px; font-size: 24px; }
+          p { margin: 0; color: #475569; line-height: 1.6; }
+        </style>
+      </head>
+      <body>
+        <main class="card">
+          <div class="icon">${isSuccess ? '&#10003;' : '!'}</div>
+          <h1>${title}</h1>
+          <p>${message}</p>
+        </main>
+      </body>
+    </html>
+  `);
+});
+
 // All other routes require authentication
 router.use(authenticate);
 
@@ -232,7 +268,7 @@ router.post('/initialize', [
       return res.status(400).json({ error: 'Amount mismatch' });
     }
 
-    const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+    const baseUrl = getBaseUrl(req);
     const safeReturnUrl = resolveReturnUrl(returnUrl);
     const callbackUrl = `${baseUrl}/api/payments/paystack-callback?returnUrl=${encodeURIComponent(safeReturnUrl)}`;
     const email = req.user.email || 'customer@example.com';

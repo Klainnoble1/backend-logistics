@@ -102,50 +102,43 @@ router.post('/login', [
 
     const { email, password } = req.body;
     
-    // Check in users table
-    const userRes = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-    let user = userRes.rows[0];
+    const [userRes, partnerRes, driverRes] = await Promise.all([
+      pool.query('SELECT * FROM users WHERE email = $1', [email]),
+      pool.query('SELECT * FROM partners WHERE email = $1', [email]),
+      pool.query('SELECT * FROM drivers WHERE email = $1', [email]),
+    ]);
+
+    const userRecord = userRes.rows[0] || null;
+    const partnerRecord = partnerRes.rows[0] || null;
+    const driverRecord = driverRes.rows[0] || null;
+    let user = null;
     let accountType = 'user';
-    let partnerRecord = null;
 
-    if (user?.role === 'partner') {
-      const partnerRes = await pool.query('SELECT * FROM partners WHERE email = $1', [email]);
-      partnerRecord = partnerRes.rows[0] || null;
+    if (!userRecord && !partnerRecord && !driverRecord) {
+      return res.status(401).json({ error: 'Invalid email or password' });
     }
 
-    if (!user) {
-      const partnerRes = await pool.query('SELECT * FROM partners WHERE email = $1', [email]);
-      partnerRecord = partnerRes.rows[0] || null;
-      if (partnerRecord) {
-        user = {
-          ...partnerRecord,
-          role: 'partner',
-        };
-        accountType = 'partner';
+    if (partnerRecord?.password_hash && await bcrypt.compare(password, partnerRecord.password_hash)) {
+      if (!partnerRecord.is_active) {
+        return res.status(401).json({ error: 'Account is inactive' });
       }
-    }
-
-    // If not in users, check in drivers
-    if (!user) {
-      const driverRes = await pool.query('SELECT * FROM drivers WHERE email = $1', [email]);
-      user = driverRes.rows[0];
+      user = { ...partnerRecord, role: 'partner' };
+      accountType = 'partner';
+    } else if (userRecord?.password_hash && await bcrypt.compare(password, userRecord.password_hash)) {
+      if (!userRecord.is_active) {
+        return res.status(401).json({ error: 'Account is inactive' });
+      }
+      user = userRecord;
+      accountType = 'user';
+    } else if (driverRecord?.password_hash && await bcrypt.compare(password, driverRecord.password_hash)) {
+      if (!driverRecord.is_active) {
+        return res.status(401).json({ error: 'Account is inactive' });
+      }
+      user = driverRecord;
       accountType = 'driver';
     }
 
     if (!user) {
-      return res.status(401).json({ error: 'Invalid email or password' });
-    }
-
-    if (!user.is_active) {
-      return res.status(401).json({ error: 'Account is inactive' });
-    }
-
-    // Verify password (bcrypt compare)
-    let valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid && partnerRecord?.password_hash) {
-      valid = await bcrypt.compare(password, partnerRecord.password_hash);
-    }
-    if (!valid) {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
